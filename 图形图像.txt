@@ -1,0 +1,4079 @@
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
+using System.IO;
+using System.Collections.Generic;
+using System.Drawing.Imaging;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+//添加引用:  bin\Debug\ParallelExtensionsExtras.dll
+using Microsoft.Drawing;//必须,ParallelExtensionsExtras.dll
+using Point = System.Drawing.Point;
+using Parallel = System.Threading.Tasks.Parallel;
+using AForge;//必须
+using AForge.Math;//必须
+using OpenCvSharp;
+using System.ComponentModel;
+using System.Drawing;
+using System.Linq;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;//要用到DllImport
+using System.Threading;
+using System.Drawing.Imaging;
+using System.Diagnostics;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
+using System.IO;
+using System.Collections.Generic;
+using System.Drawing.Imaging;
+using System.Threading.Tasks;
+
+
+using Emgu.CV;
+using Emgu.CV.CvEnum;
+using Emgu.CV.Structure;
+using Emgu.CV.Util;
+using Emgu.Util;
+using Emgu.CV.UI;
+using Emgu.CV.OCR;
+using Emgu.CV.Features2D;
+using RotatedRect = Emgu.CV.Structure.RotatedRect;
+using VectorOfPoint = Emgu.CV.Util.VectorOfPoint;
+
+namespace Microsoft.ParallelComputingPlatform.ParallelExtensions.Samples
+{
+    public partial class MainForm : Form
+    {
+        float PI = 3.14159265f;
+        int picW, picH;//bmpfile图片文件之宽度与高度
+        bool[,] xy; //贮存边缘黑点
+        Dictionary<PointF, int> DP;//直线识别用
+        string strFileName;//打开的文件
+        static int h = 6;//条宽调节，范围：2---12
+
+
+        //窗体初始化:
+        public MainForm()
+        {
+            InitializeComponent();
+            strFileName = "捕获08.PNG";
+            pbOutput.Image = Bitmap.FromFile(strFileName);
+            DP = new Dictionary<PointF, int>();
+        }
+
+        /**********************************************************/
+
+        //调节器：
+        private void trackBar1_Scroll(object sender, EventArgs e)
+        {
+            h = trackBar1.Value;
+            pbOutput.Image = Bitmap.FromFile(strFileName);
+            button11_Click(null, null);
+        }
+
+        //返回原图:
+        private void button9_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile(strFileName);
+        }
+
+        //打开图片：
+        private void button3_Click(object sender, EventArgs e)
+        {
+            OpenFileDialog ofd = new OpenFileDialog();
+            ofd.Filter = "图片文件(*.jpg;*.png;*.bmp)|*.jpg;*.png;*.bmp|所有文件|*.*";
+            ofd.ValidateNames = true;
+            ofd.CheckPathExists = true;
+            ofd.CheckFileExists = true;
+            if (ofd.ShowDialog() == DialogResult.OK)
+            {
+                strFileName = ofd.FileName;
+                //其他代码：
+                pbOutput.Image = Bitmap.FromFile(strFileName);
+            }
+        }
+
+        //保存图片：
+        private void button4_Click(object sender, EventArgs e)
+        {
+            /*
+             * //用户自己找目录，系统自动用时间戳作文件名：======================================
+            FolderBrowserDialog folder = new FolderBrowserDialog();
+            folder.Description = "选择所有文件存放目录";
+            if (folder.ShowDialog() == DialogResult.OK)
+            {
+
+                string sPath = folder.SelectedPath;
+                //MessageBox.Show(sPath);
+                pbOutput.Image.Save(sPath + "/Img" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".png");
+                this.Text = "文件已经保存在："+sPath ;
+            }
+            */
+
+
+            //用户自己找目录，取文件名时：===============================
+            SaveFileDialog saveFileDialog1 = new SaveFileDialog();
+
+            saveFileDialog1.Filter = "图片文件(*.png)|*.png";
+
+            saveFileDialog1.FilterIndex = 2;
+            saveFileDialog1.RestoreDirectory = true;
+
+            if (saveFileDialog1.ShowDialog() == DialogResult.OK)
+            {
+                pbOutput.Image.Save(saveFileDialog1.FileName);
+            }
+        }
+
+        /**********************************************************/
+
+        //RGB相位重组--算法测试:
+        private void btnParallel_Click(object sender, EventArgs e)
+        {
+            Bitmap bmp1 = (Bitmap)pbOutput.Image;
+
+            //用工厂级任务完成:================================
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            Task.Factory.StartNew(delegate
+            {
+                Bitmap output = BlendImages2(bmp1);//调用运算函数
+                return new { output };//返回:output
+            }).ContinueWith(t =>
+            {
+                pbOutput.Image = t.Result.output;//更新线程外UI
+            }, uiScheduler);
+        }
+
+        //RGB相位重组---使用FastBitmap库,及并行处理的函数:
+        internal unsafe static Bitmap BlendImages2(Bitmap start)
+        {
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+                    //各像素处理:
+                    for (int i = 0; i < width; i++)
+                    {
+                        //算法-1：
+                        //outPixel->R = (byte)(255 - srcPixel->R);
+                        //outPixel->G = (byte)(i ^ j);
+                        //outPixel->B = (byte)(255 - srcPixel->B);
+
+                        //算法-2：
+                        outPixel->R = (byte)(127 - 127 * Math.Cos(srcPixel->R / 4.7f));
+                        outPixel->G = (byte)(127 + 127 * Math.Sin(srcPixel->G / 5.5f));
+                        outPixel->B = (byte)(127 + 127 * Math.Cos(srcPixel->B / 6.3f));
+
+
+                        //指针移动:
+                        outPixel++;
+                        srcPixel++;
+                    }
+                });
+            return output;
+        }
+
+        //灰度化：
+        private void button1_Click(object sender, EventArgs e)
+        {
+            Bitmap bmp1 = (Bitmap)pbOutput.Image;
+
+            //用工厂级任务完成:================================
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            Task.Factory.StartNew(delegate
+            {
+                Bitmap output = BlendImages3(bmp1);//调用运算函数
+                return new { output };//返回:output
+            }).ContinueWith(t =>
+            {
+                pbOutput.Image = t.Result.output;//更新线程外UI
+            }, uiScheduler);
+        }
+
+        //灰度化---使用FastBitmap库,及并行处理的函数:
+        internal unsafe static Bitmap BlendImages3(Bitmap start)
+        {
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+                    //各像素处理:
+                    for (int i = 0; i < width; i++)
+                    {
+                        byte avg = (byte)(0.3 * srcPixel->R + 0.4 * srcPixel->G + 0.3 * srcPixel->B);
+                        outPixel->R = avg;
+                        outPixel->G = avg;
+                        outPixel->B = avg;
+                        //指针移动:
+                        outPixel++;
+                        srcPixel++;
+                    }
+                });
+            return output;
+        }
+
+        //线条代灰度：
+        private void button2_Click(object sender, EventArgs e)
+        {
+            //pbOutput.Image = Bitmap.FromFile(strFileName);
+
+            Bitmap bmp1 = (Bitmap)Bitmap.FromFile(strFileName);// (Bitmap)pbOutput.Image;
+
+            //用工厂级任务完成:================================
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            Task.Factory.StartNew(delegate
+            {
+                Bitmap output = BlendImages4(bmp1);//调用运算函数
+                return new { output };//返回:output
+            }).ContinueWith(t =>
+            {
+                pbOutput.Image = t.Result.output;//更新线程外UI
+            }, uiScheduler);
+        }
+
+        //线条代灰度---使用FastBitmap库,及并行处理的函数:
+        internal unsafe static Bitmap BlendImages4(Bitmap start)
+        {
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+                    //各像素处理:
+
+                    for (int i = 0; i < width; i += h)
+                    {
+                        double avg = 0;
+                        for (int k = 0; k <= h; k++)
+                        {
+                            avg += 0.3 * srcPixel->R + 0.4 * srcPixel->G + 0.3 * srcPixel->B;
+                            srcPixel++; //指针移动
+                        }
+
+                        for (double k = 0; k < avg / 255.0; k++)
+                        {
+                            outPixel->R = (byte)255;
+                            outPixel->G = (byte)255;
+                            outPixel->B = (byte)255;
+                            outPixel++; //指针移动
+                        }
+
+                        for (double k = avg / 255.0; k < h; k++)
+                        {
+                            outPixel->R = (byte)0;
+                            outPixel->G = (byte)0;
+                            outPixel->B = (byte)0;
+                            outPixel++; //指针移动
+                        }
+                    }
+                });
+            return output;
+        }
+
+        //二值化：
+        unsafe void button5_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+                    //各像素处理:
+                    for (int i = 0; i < width; i++)
+                    {
+                        byte avg = (byte)(0.3 * srcPixel->R + 0.4 * srcPixel->G + 0.3 * srcPixel->B > 80 ? 255 : 0);
+                        outPixel->R = avg;
+                        outPixel->G = avg;
+                        outPixel->B = avg;
+                        //指针移动:
+                        outPixel++;
+                        srcPixel++;
+                    }
+                });
+            pbOutput.Image = output;
+        }
+
+        //底片化[反色]：
+        unsafe void button6_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        Color c1 = fastStart.GetColor(x, y);
+                        Color c2 = Color.FromArgb(255 - c1.R, 255 - c1.G, 255 - c1.B);
+
+                        fastOut.SetColor(x, y, c2);
+
+                    }
+
+                }
+            pbOutput.Image = output;
+        }
+
+        //边缘化-1：
+        unsafe void button7_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte c1 = fastStart.GetColor(x - 1, y - 1).G;
+                        byte c2 = fastStart.GetColor(x - 1, y + 1).G;
+                        byte c3 = fastStart.GetColor(x + 1, y + 1).G;
+                        byte c4 = fastStart.GetColor(x + 1, y - 1).G;
+
+                        byte cc = (byte)(c1 ^ c3 | c2 ^ c4);
+
+                        Color clr = Color.FromArgb(cc, cc, cc);
+
+                        fastOut.SetColor(x, y, clr);
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //边缘化-2
+        unsafe void button8_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte c1 = fastStart.GetColor(x - 1, y - 1).G;
+                        byte c2 = fastStart.GetColor(x - 1, y + 1).G;
+                        byte c3 = fastStart.GetColor(x + 1, y + 1).G;
+                        byte c4 = fastStart.GetColor(x + 1, y - 1).G;
+
+                        byte cc = (byte)((c1 ^ c3 | c2 ^ c4) > 80 ? 255 : 0);
+
+                        Color clr = Color.FromArgb(cc, cc, cc);
+
+                        fastOut.SetColor(x, y, clr);
+
+                    }
+
+                }
+            pbOutput.Image = output;
+        }
+
+        //平滑滤波与二值化：
+        unsafe void button10_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 2; x < width - 2; x += 2)
+                {
+                    for (int y = 2; y < height - 2; y += 2)
+                    {
+                        int m = 0;
+                        for (int u = -2; u < 2; u++)
+                        {
+                            for (int v = -2; v < 2; v++)
+                            {
+                                m += fastStart.GetColor(x + u, y + v).G;//0*256 -->> 16*256
+                            }
+                        }
+
+                        /*
+                         //划0,1,2,3层:
+                         for (int u = -2; u <= 2; u++)
+                            {
+                                for (int v = -2; v <= 2; v++)
+                                {
+                                    byte h =(byte) (85 * (m / (1024)));
+                                    Color clr = Color.FromArgb(h, h, h);
+                                    fastOut.SetColor(x + u, y + v, clr);
+                                }
+                          }
+                         */
+
+                        //二值化,划1层:
+                        for (int u = -2; u <= 2; u++)
+                        {
+                            for (int v = -2; v <= 2; v++)
+                            {
+                                byte h = (byte)(m > 8 * 256 ? 255 : 0);
+                                Color clr = Color.FromArgb(h, h, h);
+                                fastOut.SetColor(x + u, y + v, clr);
+                            }
+                        }
+
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //平滑滤波与多层化：
+        unsafe void button19_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 2; x < width - 2; x += 2)
+                {
+                    for (int y = 2; y < height - 2; y += 2)
+                    {
+                        int m = 0;
+                        for (int u = -2; u < 2; u++)
+                        {
+                            for (int v = -2; v < 2; v++)
+                            {
+                                m += fastStart.GetColor(x + u, y + v).G;//0*256 -->> 16*256
+                            }
+                        }
+
+                        //划0,1,2,3层:
+                        for (int u = -2; u <= 2; u++)
+                        {
+                            for (int v = -2; v <= 2; v++)
+                            {
+                                byte h = (byte)(85 * (m / (1024)));
+                                Color clr = Color.FromArgb(h, h, h);
+                                fastOut.SetColor(x + u, y + v, clr);
+                            }
+                        }
+
+                        /*
+                       //二值化,划1层:
+                       for (int u = -2; u <= 2; u++)
+                       {
+                           for (int v = -2; v <= 2; v++)
+                           {
+                               byte h = (byte)(m > 8 * 256 ? 255 : 0);
+                               Color clr = Color.FromArgb(h, h, h);
+                               fastOut.SetColor(x + u, y + v, clr);
+                           }
+                       } */
+
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //大小点代灰度:
+        unsafe void button11_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            int[,] s = new int[16, 16]{
+                 {0,0,0,0,  0,0,1,0, 0,0,0,0,   0,0,0,0},
+                 {0,0,0,0,  0,1,1,0, 0,0,0,0,   0,0,0,0},
+                 {0,0,0,0,  0,1,1,0, 0,1,0,0,   0,0,0,0},
+                 {0,0,0,0,  0,1,1,0, 0,1,1,0,   0,0,0,0},
+                 {0,0,0,0,  0,1,1,0, 0,1,1,1,   0,0,0,0},
+                 {0,0,0,0,  0,1,1,1, 0,1,1,1,   0,0,0,0},
+                 {0,0,0,1,  0,1,1,1, 0,1,1,1,   0,0,0,0},
+                 {0,0,1,1,  0,1,1,1, 0,1,1,1,   0,0,0,0},
+                 {0,1,1,1,  0,1,1,1, 0,1,1,1,   0,0,0,0},
+                 {1,1,1,1,  0,1,1,1, 0,1,1,1,   0,0,0,0},
+                 {1,1,1,1,  1,1,1,1, 0,1,1,1,   0,0,0,0},
+                 {1,1,1,1,  1,1,1,1, 1,1,1,1,   0,0,0,0},
+                 {1,1,1,1,  1,1,1,1, 1,1,1,1,   1,0,0,0},
+                 {1,1,1,1,  1,1,1,1, 1,1,1,1,   1,1,0,0},
+                 {1,1,1,1,  1,1,1,1, 1,1,1,1,   1,1,1,0},
+                 {1,1,1,1,  1,1,1,1, 1,1,1,1,   1,1,1,1}
+            };
+
+
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 2; x < width - 2; x += 2)
+                {
+                    for (int y = 2; y < height - 2; y += 2)
+                    {
+                        int m = 0;
+                        for (int u = -2; u < 2; u++)
+                        {
+                            for (int v = -2; v < 2; v++)
+                            {
+                                m += fastStart.GetColor(x + u, y + v).G;
+                            }
+                        }
+                        int t0 = (trackBar1.Value + m / 255);
+                        int t = t0 > 15 ? 15 : t0;
+                        int p = 0;
+                        for (int u = -2; u < 2; u++)
+                        {
+                            for (int v = -2; v < 2; v++)
+                            {
+                                byte bb = (byte)(s[t, p] * 255);
+                                fastOut.SetColor(x + u, y + v, Color.FromArgb(bb, bb, bb));
+                                p++;
+
+                            }
+                        }
+
+                    }
+
+                }
+            pbOutput.Image = output;
+        }
+
+        //RGB等高线:
+        unsafe void button12_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+                    //各像素处理:
+                    for (int i = 0; i < width; i++)
+                    {
+                        byte avg0 = (byte)(0.3 * srcPixel->R + 0.4 * srcPixel->G + 0.3 * srcPixel->B);
+                        //byte avg =(byte)(Math.Abs(avg0-120)<10?255:0);
+                        outPixel->R = (byte)(Math.Abs(avg0 - 80) < 10 ? 255 : 0);
+                        outPixel->G = (byte)(Math.Abs(avg0 - 120) < 10 ? 255 : 0);
+                        outPixel->B = (byte)(Math.Abs(avg0 - 160) < 10 ? 255 : 0);
+                        //指针移动:
+                        outPixel++;
+                        srcPixel++;
+                    }
+                });
+            pbOutput.Image = output;
+        }
+
+        //黑点放大:
+        unsafe void button13_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            byte[,] xy = new byte[width, height];
+            //创建FastBitmap对象:
+
+            int d = 2;
+            using (FastBitmap fastStart = new FastBitmap(start))
+            using (FastBitmap fastOut = new FastBitmap(output))
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x += 1)
+                {
+                    for (int y = 1; y < height - 1; y += 1)
+                    {
+                        xy[x, y] = (byte)(fastStart.GetColor(x, y).G > 100 ? 255 : 0);
+                        fastOut.SetColor(x, y, Color.White);
+                    }
+                }
+
+            //扩大黑点范围:
+            using (FastBitmap fastOut = new FastBitmap(output))
+                for (int x = d; x < width - d; x++)
+                {
+                    for (int y = d; y < height - d; y++)
+                    {
+                        if (xy[x, y] == 0)
+                        {
+                            for (int u = -d; u <= d; u++)
+                            {
+                                for (int v = -d; v <= d; v++)
+                                {
+                                    Color clr = Color.FromArgb(0, 0, 0);
+                                    fastOut.SetColor(x + u, y + v, clr);
+                                }
+                            }
+                        }
+                    }
+                }
+
+            pbOutput.Image = output;
+        }
+
+        //白色点放大:
+        unsafe void button14_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            byte[,] xy = new byte[width, height];
+            //创建FastBitmap对象:
+
+            int d = 2;
+            using (FastBitmap fastStart = new FastBitmap(start))
+            using (FastBitmap fastOut = new FastBitmap(output))
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x += 1)
+                {
+                    for (int y = 1; y < height - 1; y += 1)
+                    {
+                        xy[x, y] = (byte)(fastStart.GetColor(x, y).G > 156 ? 255 : 0);
+                        fastOut.SetColor(x, y, Color.Black);
+                    }
+                }
+
+            //扩大白点范围:
+            using (FastBitmap fastOut = new FastBitmap(output))
+                for (int x = d; x < width - d; x++)
+                {
+                    for (int y = d; y < height - d; y++)
+                    {
+                        if (xy[x, y] == 255)
+                        {
+                            for (int u = -d; u <= d; u++)
+                            {
+                                for (int v = -d; v <= d; v++)
+                                {
+                                    Color clr = Color.FromArgb(255, 255, 255);
+                                    fastOut.SetColor(x + u, y + v, clr);
+                                }
+                            }
+                        }
+                    }
+                }
+
+            pbOutput.Image = output;
+        }
+
+        //素描线条:
+        unsafe void button15_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte c1 = (byte)(fastStart.GetColor(x - 1, y - 1).G);
+                        byte c2 = (byte)(fastStart.GetColor(x - 1, y + 1).G);
+                        byte c3 = (byte)(fastStart.GetColor(x + 1, y + 1).G);
+                        byte c4 = (byte)(fastStart.GetColor(x + 1, y - 1).G);
+
+                        byte cc = (byte)(Math.Abs(c1 - c3) + Math.Abs(c2 - c4));
+
+                        Color clr = Color.FromArgb(cc, cc, cc);
+
+                        fastOut.SetColor(x, y, clr);
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //浮雕特效:
+        unsafe void button16_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte c1 = (byte)(fastStart.GetColor(x - 1, y - 1).G);
+                        byte c2 = (byte)(fastStart.GetColor(x - 1, y + 1).G);
+                        byte c3 = (byte)(fastStart.GetColor(x + 1, y + 1).G);
+                        byte c4 = (byte)(fastStart.GetColor(x + 1, y - 1).G);
+
+                        byte cc = (byte)((c1 - c3) + (c2 - c4));//or : (byte)((c1 - c3) + (c2 - c4));
+
+                        Color clr = Color.FromArgb(cc, cc, cc);
+
+                        fastOut.SetColor(x, y, clr);
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //平滑化+二值化,"字典+堆栈"边缘序列化:
+        private void button17_Click(object sender, EventArgs e)
+        {
+            button10_Click(sender, e);//平滑化+二值化
+
+            Bitmap bmpSrc = (Bitmap)pbOutput.Image;
+            int width = bmpSrc.Width, height = bmpSrc.Height;
+            Bitmap output = new Bitmap(width, height);
+            int d = 2; int k = 0;
+
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastSrc = new FastBitmap(bmpSrc))
+
+                //用"并行+指针"方式处理图像:                
+                //Parallel.For(d, height - d, j =>
+
+                //为应用字典,用普通的循环方式:
+                for (int j = d; j < height - d; j += d)
+                {
+                    //各像素处理:
+                    for (int i = d; i < width - d; i += d)
+                    {
+                        Byte b1 = fastSrc.GetColor(i - d, j).G;
+                        Byte b2 = fastSrc.GetColor(i + d, j).G;
+                        Byte b3 = fastSrc.GetColor(i, j - d).G;
+                        Byte b4 = fastSrc.GetColor(i, j + d).G;
+
+                        double v = Math.Abs(b2 - b1) + Math.Abs(b4 - b3);
+                        if (v >= 120)
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(0, 0, 0));
+                            //if (!d0.ContainsKey(new Point(i, j))) 
+                            d0.Add(new Point(i, j), k); k++;
+                        }
+                        else
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(255, 255, 255));
+
+                        }
+                    }
+                }
+            //});
+            MessageBox.Show("D0.Count=" + k);
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 5;//不同聚类之间的距离
+            int m = 0;//聚类的编号+
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - q * 41 % 256, q * 71 % 256)), 4),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+            pbOutput.Image = output;
+
+            //四,简易地统计:
+            string s = "简易地统计\r\n";
+            for (int i = 1; i <= m; i++)
+            {
+
+                var xAvg = d1.Where(o => o.Value == i).Average(o => o.Key.X);
+                var yAvg = d1.Where(o => o.Value == i).Average(o => o.Key.Y);
+                //中心处画圆:
+                g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg - 5, 10, 10);
+                s += i + "#: xAvg=" + xAvg + ", yAvg=" + yAvg + "\r\n";
+
+                //计算范围边界:
+                var xMax = d1.Where(o => o.Value == i).Max(o => o.Key.X);
+                var yMax = d1.Where(o => o.Value == i).Max(o => o.Key.Y);
+                var xMin = d1.Where(o => o.Value == i).Min(o => o.Key.X);
+                var yMin = d1.Where(o => o.Value == i).Min(o => o.Key.Y);
+                //绘制四边:
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMin, yMax));
+                //g.DrawLine(
+                //        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                //        new Point(xMin, yMax), new Point(xMax, yMax));
+                //g.DrawLine(
+                //        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                //        new Point(xMax, yMin), new Point(xMax, yMax));
+                //g.DrawLine(
+                //        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                //        new Point(xMin, yMin), new Point(xMax, yMin));
+                //序号与数目(面积):
+                var count = d1.Where(o => o.Value == i).Count();
+                g.DrawString(i + "#:" + count.ToString(), new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg + 15);
+            }
+
+            MessageBox.Show(s);
+        }
+
+        //平滑化+二值化,"字典+堆栈"黑区序列化:
+        private void button18_Click(object sender, EventArgs e)
+        {
+            button10_Click(sender, e);//平滑化+二值化
+
+            Bitmap bmpSrc = (Bitmap)pbOutput.Image;
+            int width = bmpSrc.Width, height = bmpSrc.Height;
+            Bitmap output = new Bitmap(width, height);
+            int d = 4; int k = 0;
+
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastSrc = new FastBitmap(bmpSrc))
+
+                //用"并行+指针"方式处理图像:                
+                //Parallel.For(d, height - d, j =>
+
+                //为应用字典,用普通的循环方式:
+                for (int j = d; j < height - d; j += d)
+                {
+                    //各像素处理:
+                    for (int i = d; i < width - d; i += d)
+                    {
+                        double v = fastSrc.GetColor(i, j).G;
+                        if (v < 40)
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(0, 0, 0));
+                            d0.Add(new Point(i, j), k); k++;
+                        }
+                        else
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(255, 255, 255));
+                        }
+                    }
+                }
+            //});
+            MessageBox.Show("D0.Count=" + k);
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 10;//不同聚类之间的距离
+            int m = 0;//聚类的编号
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            // Graphics g = this.pbOutput.CreateGraphics(); ;//Graphics.FromImage(pbOutput.Image);
+            Graphics g = Graphics.FromImage(pbOutput.Image); //this.pbOutput.CreateGraphics(); ;
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - q * 41 % 256, q * 71 % 256)), 4),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+            pbOutput.Image = output;
+
+            //四,简易地统计:
+            string s = "简易地统计\r\n";
+            for (int i = 1; i <= m; i++)
+            {
+
+                var xAvg = d1.Where(o => o.Value == i).Average(o => o.Key.X);
+                var yAvg = d1.Where(o => o.Value == i).Average(o => o.Key.Y);
+                //中心处画圆:
+                g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg - 5, 10, 10);
+                s += i + "#: xAvg=" + xAvg + ", yAvg=" + yAvg + "\r\n";
+
+                //计算范围边界:
+                var xMax = d1.Where(o => o.Value == i).Max(o => o.Key.X);
+                var yMax = d1.Where(o => o.Value == i).Max(o => o.Key.Y);
+                var xMin = d1.Where(o => o.Value == i).Min(o => o.Key.X);
+                var yMin = d1.Where(o => o.Value == i).Min(o => o.Key.Y);
+                //绘制四边:
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMin, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMax), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMax, yMin), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMax, yMin));
+                //序号与数目(面积):
+                var count = d1.Where(o => o.Value == i).Count();
+                g.DrawString(i + "#:" + count.ToString(), new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg + 15);
+            }
+
+            MessageBox.Show(s);
+
+
+        }
+
+        //合成分形纹理:
+        unsafe void button20_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte r = (byte)(fastStart.GetColor(x, y).R);
+                        byte g = (byte)(fastStart.GetColor(x, y).G);
+                        byte b = (byte)(fastStart.GetColor(x, y).B);
+                        /*
+                         分形图生成，有M氏与J氏的算法，是对复数进行N次迭代的算法：
+                         */
+
+                        float xx = x / (float)width, yy = y / (float)height, cx = 0, cy = 0;
+                        for (int i = 0; i < 20; i++)
+                        {
+                            cx = xx * xx - yy * yy + 0.38f;
+                            cy = 2 * xx * yy + 0.25f;
+                            xx = cx; yy = cy;
+                            if (cx * cx + cy * cy > 3) break;
+                        }
+                        byte cr = (byte)(cx * r); byte cg = (byte)(cy * g); byte cb = (byte)(cx + cy + b);
+
+                        Color clr = Color.FromArgb(cr, cg, cb);
+
+                        fastOut.SetColor(x, y, clr);
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //中心对称式非线性变换：
+        private void button21_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        float dx = x - width / 2f; float dy = y - height / 2f;
+                        float R = (float)Math.Sqrt(dx * dx + dy * dy);
+                        //1--鱼眼：
+                        //int x2 = (int)(width / 2 + dx * Math.Exp(-R / 600f));
+                        //int y2 = (int)(height / 2 + dy * Math.Exp(-R / 600f));
+                        //2--变脸：
+                        //int x2 = (int)(width / 2 + dx * Math.Sin(-R / 100f));
+                        //int y2 = (int)(height / 2 - dy * Math.Sin(-R / 100f));
+                        //3--涟漪：
+                        //int x2 = (int)(width / 2 + dx * Math.Cos(-R * R / 100f));
+                        //int y2 = (int)(height / 2 + dy * Math.Sin(-R * R / 100f));
+
+                        int x2 = (int)(width / 2 + dx * Math.Cos(-R / 100f));
+                        int y2 = (int)(height / 2 + dy * Math.Cos(-R / 100f));
+
+                        byte r = (byte)(fastStart.GetColor(x2, y2).R);
+                        byte g = (byte)(fastStart.GetColor(x2, y2).G);
+                        byte b = (byte)(fastStart.GetColor(x2, y2).B);
+                        Color clr = Color.FromArgb(r, g, b);
+                        fastOut.SetColor(x, y, clr);
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //AForge点云之最大的四边形:
+        //点集的最大的四边形:
+        private void button22_Click(object sender, EventArgs e)
+        {
+            button10_Click(sender, e);//平滑化+二值化
+
+            Bitmap bmpSrc = (Bitmap)pbOutput.Image;
+            int width = bmpSrc.Width, height = bmpSrc.Height;
+            Bitmap output = new Bitmap(width, height);
+            int d = 2; int k = 0;
+
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastSrc = new FastBitmap(bmpSrc))
+
+                //用"并行+指针"方式处理图像:                
+                //Parallel.For(d, height - d, j =>
+
+                //为应用字典,用普通的循环方式:
+                for (int j = d; j < height - d; j += d)
+                {
+                    //各像素处理:
+                    for (int i = d; i < width - d; i += d)
+                    {
+                        Byte b1 = fastSrc.GetColor(i - d, j).G;
+                        Byte b2 = fastSrc.GetColor(i + d, j).G;
+                        Byte b3 = fastSrc.GetColor(i, j - d).G;
+                        Byte b4 = fastSrc.GetColor(i, j + d).G;
+
+                        double v = Math.Abs(b2 - b1) + Math.Abs(b4 - b3);
+                        if (v >= 120)
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(0, 0, 0));
+                            //if (!d0.ContainsKey(new Point(i, j))) 
+                            d0.Add(new Point(i, j), k); k++;
+                        }
+                        else
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(255, 255, 255));
+
+                        }
+                    }
+                }
+            //});
+            MessageBox.Show("D0.Count=" + k);
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 5;//不同聚类之间的距离
+            int m = 0;//聚类的编号
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - q * 41 % 256, q * 71 % 256)), 4),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+            pbOutput.Image = output;
+
+            //四,简易地统计:
+            string s = "简易地统计\r\n";
+            for (int i = 1; i <= m; i++)
+            {
+
+                var xAvg = d1.Where(o => o.Value == i).Average(o => o.Key.X);
+                var yAvg = d1.Where(o => o.Value == i).Average(o => o.Key.Y);
+                //中心处画圆:
+                g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg - 5, 10, 10);
+                s += i + "#: xAvg=" + xAvg + ", yAvg=" + yAvg + "\r\n";
+
+                //计算范围边界:
+                var xMax = d1.Where(o => o.Value == i).Max(o => o.Key.X);
+                var yMax = d1.Where(o => o.Value == i).Max(o => o.Key.Y);
+                var xMin = d1.Where(o => o.Value == i).Min(o => o.Key.X);
+                var yMin = d1.Where(o => o.Value == i).Min(o => o.Key.Y);
+                //绘制四边:
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMin, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMax), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMax, yMin), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMax, yMin));
+                //序号与数目(面积):
+                var count = d1.Where(o => o.Value == i).Count();
+                g.DrawString(i + "#:" + count.ToString(), new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg + 15);
+
+                //AForge:最大的四边形--四个点表示:                
+                List<IntPoint> cloudm = new List<IntPoint>();
+                var pt = d1.Where(o => o.Value == i).Select(o => o.Key);
+                foreach (var h in pt)
+                {
+                    cloudm.Add(new IntPoint(h.X, h.Y));
+                }
+                List<IntPoint> LP = AForge.Math.Geometry.PointsCloud.FindQuadrilateralCorners(cloudm);//其他的,如:.GetFurthestPoint(cloudm,new IntPoint ((int)xAvg,(int)yAvg));//.GetBoundingRectangle(cloudm,out minXY,out maxXY);//.FindQuadrilateralCorners(cloudm);
+                foreach (var h in LP)
+                {
+                    g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 0, 255)),
+                        (int)h.X - 2, (int)h.Y - 2, 4, 4);
+                }
+            }
+
+            MessageBox.Show(s);
+
+
+            /*
+             public static 
+             * System.Collections.Generic.List<IntPoint> FindQuadrilateralCorners(
+             * System.Collections.Generic.IEnumerable<IntPoint> cloud)
+                AForge.Math.Geometry.PointsCloud 的成员
+             
+
+            List<IntPoint> cloud = new List<IntPoint>();
+
+            for (int i = 0; i < 1000; i++)
+            {
+                int x = (int)(50 + 50 * Math.Cos(i / 33.0));
+                int y = (int)(50 + 50 * Math.Sin(i / 37.0));
+
+                cloud.Add(new IntPoint(x, y));
+            }
+            List<IntPoint> LP = AForge.Math.Geometry.PointsCloud.FindQuadrilateralCorners(cloud);
+            MessageBox.Show("LP.Count=" + LP.Count);*/
+        }
+
+        //=======================================================
+
+        //加载曲线族图片:
+        private void button23_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("Lines.png");
+        }
+
+        //细化成白色点,分组与统计:
+        unsafe private void button24_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("Lines.png");
+            //button17_Click(sender, e);//边缘化-->分组统计
+            //button18_Click(sender, e);//区块化-->分组统计
+            int d = 3;
+            Bitmap start = (Bitmap)pbOutput.Image;
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = d; x < width - d; x += d)
+                {
+                    for (int y = d; y < height - d; y += d)
+                    {
+                        int fm = 0; int xb = 0, yb = 0;
+                        for (int u = -d; u < d; u++)
+                        {
+                            for (int v = -d; v < d; v++)
+                            {
+                                if (fastStart.GetColor(x + u, y + v).G == 0)
+                                {
+                                    xb += x + u;
+                                    yb += y + v;
+                                    fm++;
+
+                                    Color clr = Color.FromArgb(0, 0, 200);
+                                    fastOut.SetColor(x + u, y + v, clr);
+
+
+                                }
+                            }
+                        }
+
+                        if (fm > 1.5 * d * d)
+                        {
+                            Color clr = Color.FromArgb(255, 255, 255);
+                            fastOut.SetColor(xb / fm, yb / fm, clr);
+                            if (!d0.ContainsKey(new Point(xb / fm, yb / fm))) d0.Add(new Point(xb / fm, yb / fm), 0);
+                        }
+                    }
+                }
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 5;//不同聚类之间的距离
+            int m = 0;//聚类的编号
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - q * 41 % 256, q * 71 % 256)), 1),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+            pbOutput.Image = output;
+
+            //四,简易地统计:
+            string s = "简易地统计\r\n";
+            for (int i = 1; i <= m; i++)
+            {
+
+                var xAvg = d1.Where(o => o.Value == i).Average(o => o.Key.X);
+                var yAvg = d1.Where(o => o.Value == i).Average(o => o.Key.Y);
+                //中心处画圆:
+                g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg - 5, 10, 10);
+                s += i + "#: xAvg=" + xAvg + ", yAvg=" + yAvg + "\r\n";
+
+                //计算范围边界:
+                var xMax = d1.Where(o => o.Value == i).Max(o => o.Key.X);
+                var yMax = d1.Where(o => o.Value == i).Max(o => o.Key.Y);
+                var xMin = d1.Where(o => o.Value == i).Min(o => o.Key.X);
+                var yMin = d1.Where(o => o.Value == i).Min(o => o.Key.Y);
+                //绘制四边:
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMin, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMax), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMax, yMin), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMax, yMin));
+                //序号与数目(面积):
+                var count = d1.Where(o => o.Value == i).Count();
+                g.DrawString(i + "#:" + count.ToString(), new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg + 15);
+            }
+
+            MessageBox.Show(s);
+
+        }
+
+        //斜率与曲率分析(一阶,二阶方向导数):
+        unsafe private void button25_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("Lines.png");
+            //button17_Click(sender, e);//边缘化-->分组统计
+            //button18_Click(sender, e);//区块化-->分组统计
+            int d = 3;
+            Bitmap start = (Bitmap)pbOutput.Image;
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = d; x < width - d; x += d)
+                {
+                    for (int y = d; y < height - d; y += d)
+                    {
+                        int fm = 0; int xb = 0, yb = 0;
+                        for (int u = -d; u < d; u++)
+                        {
+                            for (int v = -d; v < d; v++)
+                            {
+                                if (fastStart.GetColor(x + u, y + v).G == 0)
+                                {
+                                    xb += x + u;
+                                    yb += y + v;
+                                    fm++;
+
+                                    Color clr = Color.FromArgb(0, 0, 200);
+                                    fastOut.SetColor(x + u, y + v, clr);
+                                }
+                            }
+                        }
+
+                        if (fm > 1.5 * d * d)
+                        {
+                            Color clr = Color.FromArgb(255, 255, 255);
+                            fastOut.SetColor(xb / fm, yb / fm, clr);
+                            if (!d0.ContainsKey(new Point(xb / fm, yb / fm))) d0.Add(new Point(xb / fm, yb / fm), 0);
+                        }
+                    }
+                }
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 5;//不同聚类之间的距离
+            int m = 0;//聚类的编号
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            //MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            /**/
+            Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), 4),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+            pbOutput.Image = output;
+
+
+            /*
+            
+            */
+            //pbOutput.Image = Bitmap.FromFile("Lines.png");
+            //Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+
+            //四,绘制斜率与曲率,以点集画之:
+            Queue<Point> qp = new Queue<Point>(20); int id = 0;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    //一阶方向导数:
+                    g.FillEllipse(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), (int)(id / 3.6), 300 + (int)(3 * (3.2 + Math.Atan2((crt.Y - fst.Y), (crt.X - fst.X)))), 2, 2);
+                    //二阶方向导数:
+                    if ((crt.X + fst.X - 2 * mid.X) != 0) g.FillEllipse(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), (int)(id / 3.6), 500 + (int)(8 * (3.2 + Math.Atan2((crt.Y - mid.Y), (crt.X - mid.X))) - 8 * (3.2 + Math.Atan2((mid.Y - fst.Y), (mid.X - fst.X)))), 2, 2);
+                }
+                id++;
+            }
+
+            //以细线画之.一阶方向导数:
+            id = 0; int id2 = 0; int x0 = 0, y0 = 0, xk, yk;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                Pen pen = new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), 2);
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    if (id2 == 0)
+                    {
+                        x0 = (int)(id / 3.6); y0 = 300 + (int)(3 * (3.2 + Math.Atan2((crt.Y - fst.Y), (crt.X - fst.X))));
+                    }
+                    else
+                    {
+                        xk = (int)(id / 3.6); yk = 300 + (int)(3 * (3.2 + Math.Atan2((crt.Y - fst.Y), (crt.X - fst.X))));
+                        g.DrawLine(pen, new Point(x0, y0), new Point(xk, yk));
+                        x0 = xk; y0 = yk;
+                    }
+                    id2++;
+                }
+                id++;
+            }
+
+            //以细线画之.二阶方向导数:
+            id = 0; id2 = 0; x0 = 0; y0 = 0;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                Pen pen = new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), 2);
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    if (id2 == 0)
+                    {
+                        x0 = (int)(id / 3.6); y0 = 500 + (int)(8 * (3.2 + Math.Atan2((crt.Y - mid.Y), (crt.X - mid.X))) - 8 * (3.2 + Math.Atan2((mid.Y - fst.Y), (mid.X - fst.X))));
+                    }
+                    else
+                    {
+                        xk = (int)(id / 3.6); yk = 500 + (int)(8 * (3.2 + Math.Atan2((crt.Y - mid.Y), (crt.X - mid.X))) - 8 * (3.2 + Math.Atan2((mid.Y - fst.Y), (mid.X - fst.X))));
+                        g.DrawLine(pen, new Point(x0, y0), new Point(xk, yk));
+                        x0 = xk; y0 = yk;
+                    }
+                    id2++;
+                }
+                id++;
+            }
+
+            //五,简易地统计:
+            string s = "简易地统计\r\n";
+            for (int i = 1; i <= m; i++)
+            {
+
+                var xAvg = d1.Where(o => o.Value == i).Average(o => o.Key.X);
+                var yAvg = d1.Where(o => o.Value == i).Average(o => o.Key.Y);
+                //中心处画圆:
+                g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg - 5, 10, 10);
+                s += i + "#: xAvg=" + xAvg + ", yAvg=" + yAvg + "\r\n";
+
+                //计算范围边界:
+                var xMax = d1.Where(o => o.Value == i).Max(o => o.Key.X);
+                var yMax = d1.Where(o => o.Value == i).Max(o => o.Key.Y);
+                var xMin = d1.Where(o => o.Value == i).Min(o => o.Key.X);
+                var yMin = d1.Where(o => o.Value == i).Min(o => o.Key.Y);
+                //绘制四边:
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMin, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMax), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMax, yMin), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMax, yMin));
+                //序号与数目(面积):
+                var count = d1.Where(o => o.Value == i).Count();
+                g.DrawString(i + "#:" + count.ToString(), new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg + 15);
+            }
+
+
+        }
+
+        //队列与字典测试:
+        private void button26_Click(object sender, EventArgs e)
+        {
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();
+            for (int i = 0; i < 999; i++)
+            {
+                int v = i / 100;
+                int x = (int)(9876 * (i / 1000f + Math.Cos(i / 2345f)));
+                int y = (int)(6789 * Math.Sin(i / 1234f));
+                d1.Add(new Point(x, y), v);
+            }
+
+            pbOutput.Image = Bitmap.FromFile("Lines.png");
+            Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+                                                             //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+
+            //四,绘制斜率与曲率:
+            Queue<Point> qp = new Queue<Point>(20); int id = 0;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    g.FillEllipse(new SolidBrush(Color.Red), id, 100 + 3 * (fst.Y - crt.Y), 2, 2);
+                    g.FillEllipse(new SolidBrush(Color.DarkGray), id, 600 + 3 * (fst.Y + crt.Y - 2 * mid.Y), 2, 2);
+                }
+                id++;
+            }
+            //MessageBox.Show("");
+        }
+
+        //快速富里叶变换:
+        private void button27_Click(object sender, EventArgs e)
+        {
+
+            pbOutput.Image = Bitmap.FromFile("H.png");
+            Graphics g = Graphics.FromImage(pbOutput.Image);
+            int x0 = 399; int y0 = 313;
+
+            //元素数目应是2的N次方:
+            AForge.Math.Complex[] data = new Complex[]{
+                new Complex(398,271),//1
+                new Complex(425,234),//2
+                new Complex(472,229),//3
+                new Complex(495,268),//4
+                new Complex(478,337),//5
+                new Complex(443,380),//6
+                new Complex(398,412),//7
+                new Complex(351,376),//8
+                new Complex(318,333),//9
+                new Complex(302,278),//10
+                new Complex(319,235),//11
+                new Complex(367,229),//12
+                new Complex(398,271),//13
+                new Complex(425,234),//14
+                new Complex(472,229),//15
+                new Complex(495,268) //16 
+            };
+
+            //平移所有点:
+            for (int i = 0; i < 16; i++)
+            {
+                data[i].Re -= x0; data[i].Im -= y0;
+            }
+
+            AForge.Math.FourierTransform.Direction direction = AForge.Math.FourierTransform.Direction.Forward;
+            AForge.Math.FourierTransform.FFT(data, direction);
+            Pen pen = new Pen(new SolidBrush(Color.FromArgb(55, 55, 100)), 1);
+
+            for (int i = 0; i < 16; i++)
+            {
+                double xc = 3 * data[i].Re; double yc = 3 * data[i].Im;
+
+                //----------------(Re,Im)------------------
+                g.FillEllipse(new SolidBrush(Color.BlueViolet), x0 + (int)xc - 2, y0 + (int)yc - 2, 4, 4);
+                g.DrawLine(pen, new Point(x0, y0), new Point(x0 + (int)xc, y0 + (int)yc));
+                //------------Re-----------------
+                g.DrawLine(pen, new Point(0, 200), new Point(50 * 16, 200));//x
+                g.DrawLine(pen, new Point(50 * i, 200), new Point(50 * i, 200 + (int)xc));
+                g.DrawString("Re", new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.BlueViolet), new PointF(50 * 16, 200 - 20));
+                //------------Im-----------------
+                g.DrawLine(pen, new Point(0, 600), new Point(50 * 16, 600));//y
+                g.DrawLine(pen, new Point(50 * i, 600), new Point(50 * i, 600 + (int)yc));
+                g.DrawString("Im", new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.BlueViolet), new PointF(50 * 16, 600 - 20));
+            }
+        }
+
+        //按相位进行排序:
+        private void button28_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("six.png");
+            Graphics g = Graphics.FromImage(pbOutput.Image);
+
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            byte[,] xy = new byte[width, height];
+            //创建FastBitmap对象:
+
+            List<Point> LP = new List<Point>();
+            using (FastBitmap fastStart = new FastBitmap(start))
+            using (FastBitmap fastOut = new FastBitmap(output))
+                //读取黑点到LP：
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        if (fastStart.GetColor(x, y).G == 0)
+                        {
+                            LP.Add(new Point(x, y));
+                        }
+                    }
+                }
+
+            var xb = LP.Average(o => o.X); var yb = LP.Average(o => o.Y);
+
+            Dictionary<Point, double> DP = new Dictionary<Point, double>();
+            foreach (var p in LP)
+            {
+                double a = Math.Atan2(p.Y - yb, p.X - xb);
+                DP.Add(p, a);
+            }
+
+            //按角度排序后,存入新字典中,再出图:  
+            Dictionary<Point, double> DP2 = DP.OrderBy(o => o.Value).ToDictionary(p => p.Key, o => o.Value);
+
+            Pen pen;// = new Pen(new SolidBrush(Color.FromArgb(55, 55, 100)), 1);
+            int xmv = 0;
+            foreach (var p in DP2)
+            {
+                byte clr = (byte)(255 * xmv / (float)DP2.Count);
+                pen = new Pen(new SolidBrush(Color.FromArgb(clr, 55, clr)), 1);
+                g.DrawLine(pen, new Point((int)xb, (int)yb), p.Key);
+
+                double R = Math.Sqrt((p.Key.X - xb) * (p.Key.X - xb) + (p.Key.Y - yb) * (p.Key.Y - yb));
+                g.DrawLine(pen, new Point(xmv, 700), new Point(xmv, 700 - (int)R));
+                xmv++;
+            }
+
+        }
+
+        //螺旋线搜索法区块对象分类:
+        private void button29_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("313.png");
+
+            Bitmap start = (Bitmap)pbOutput.Image;
+            Bitmap bmpNew = dog03(start);
+
+            pbOutput.Image = bmpNew;
+        }
+
+        //螺旋线搜索法,建立有序边缘点集[快]:
+        private Bitmap dog03(Bitmap bmp)
+        {
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();
+
+            Bitmap dg = bmp;// new Bitmap(bmp.Width, bmp.Height);
+            d0.Clear(); d1.Clear();
+
+            //1,生成边缘点集D0:
+            int k = 0;
+            for (int xi = 0; xi < bmp.Width; xi++)
+            {
+                for (int yi = 0; yi < bmp.Height; yi++)
+                {
+                    if (dg.GetPixel(xi, yi).R == 0)
+                    {
+                        d0.Add(new Point(xi, yi), k);
+                    }
+                }
+            }
+            this.Text = "d0.Count" + d0.Count;
+
+
+            //2,
+            int x0 = bmp.Width / 2, y0 = bmp.Height / 2;
+
+            int r = 1; int m = 0; int x, y;
+            while (d0.Count > 0)
+            {
+                d0.Remove(new Point(x0, y0));
+                if (!d1.ContainsKey(new Point(x0, y0))) d1.Add(new Point(x0, y0), m);
+
+                //1,
+                y = y0 - r;
+                for (x = x0 - r; x <= x0 + r - 1; x++)
+                {
+                    if (d0.ContainsKey(new Point(x, y)))
+                    {
+                        x0 = x; y0 = y;
+                        r = 0; break;
+                    }
+                }
+
+                //2,
+                x = x0 + r;
+                for (y = y0 - r; y <= y0 + r - 1; y++)
+                {
+                    if (d0.ContainsKey(new Point(x, y)))
+                    {
+                        x0 = x; y0 = y;
+                        r = 0; break;
+                    }
+                }
+
+
+                //3,向右扫描:
+                y = y0 + r;
+                for (x = x0 + r; x >= x0 - r - 1; x--)
+                {
+                    if (d0.ContainsKey(new Point(x, y)))
+                    {
+                        x0 = x; y0 = y;
+                        r = 0; break;
+                    }
+                }
+
+                //4,向左扫描:
+                x = x0 - r;
+                for (y = y0 + r; y >= y0 - r - 1; y--)
+                {
+                    if (d0.ContainsKey(new Point(x, y)))
+                    {
+                        x0 = x; y0 = y;
+                        r = 0; break;
+                    }
+                }
+
+                if (r > 25) m++;
+                r++;
+                if (r > dg.Width / 2) break;
+            }
+
+
+            //3,显示:
+            this.Text = "d0.Count" + d0.Count + ",d1.Count" + d1.Count;
+            foreach (Point z in d1.Keys)
+            {
+                dg.SetPixel(z.X, z.Y, Color.FromArgb((37 * d1[z]) % 255, (41 * d1[z]) % 255, (51 * d1[z]) % 255));
+            }
+
+            return dg;
+        }
+
+        //框式膨胀搜索法区块对象分类:
+        private void button30_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("313.png");
+
+            Bitmap start = (Bitmap)pbOutput.Image;
+            Bitmap bmpNew = dog02(start);
+
+            pbOutput.Image = bmpNew;
+        }
+
+        //框式膨胀搜索法,建立有序边缘点集[快]:
+        private Bitmap dog02(Bitmap bmp)
+        {
+            Bitmap dg = bmp;// new Bitmap(bmp.Width, bmp.Height);
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();
+
+
+            d0.Clear(); d1.Clear();
+            //1,生成边缘点集D0://Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+
+            int k = 0;
+            for (int x = 0; x < bmp.Width; x++)
+            {
+                for (int y = 0; y < bmp.Height; y++)
+                {
+                    if (dg.GetPixel(x, y).R == 0)
+                    {
+                        d0.Add(new Point(x, y), k);
+                    }
+                }
+            }
+
+            //2,生成有序边缘点集D1:Dictionary<Point, int> d1 = new Dictionary<Point, int>();
+            int r = 1; int m = 0;
+            int sx = bmp.Width / 2; int sy = bmp.Height / 2;
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+
+                //搜索线1:                
+                for (int x = sx - r; x < sx + r; x++)
+                {
+                    int y1 = sy - r;
+                    if (d0.ContainsKey(new Point(x, y1)))
+                    {
+                        sx = x; sy = y1;
+                        if (!d1.ContainsKey(new Point(x, y1))) d1.Add(new Point(x, y1), m);
+                        r = 0; break;
+                    }
+                }
+
+                //搜索线2:
+                for (int y = sy - r; y < sy + r; y++)
+                {
+                    int x2 = sx + r;
+                    if (d0.ContainsKey(new Point(x2, y)))
+                    {
+                        sx = x2; sy = y;
+                        if (!d1.ContainsKey(new Point(x2, y))) d1.Add(new Point(x2, y), m);
+                        r = 0; break;
+                    }
+                }
+
+                //搜索线3:                
+                for (int x = sx + r - 1; x >= sx - r; x--)
+                {
+                    int y2 = sy + r;
+                    if (d0.ContainsKey(new Point(x, y2)))
+                    {
+                        sx = x; sy = y2;
+                        if (!d1.ContainsKey(new Point(x, y2))) d1.Add(new Point(x, y2), m);
+                        r = 0; break;
+                    }
+                }
+
+                //搜索线4:
+                for (int y = sy + r - 1; y >= sy - r; y--)
+                {
+                    int x1 = sx - r;
+                    if (d0.ContainsKey(new Point(x1, y)))
+                    {
+                        sx = x1; sy = y;
+                        if (!d1.ContainsKey(new Point(x1, y))) d1.Add(new Point(x1, y), m);
+                        r = 0; break;
+                    }
+                }
+
+                r++;
+                if (r > 25) m++; //超过25像素,另一组开始.                
+                if (r > dg.Width / 2) break;
+            }
+
+
+            //3,显示:
+            foreach (Point z in d1.Keys)
+            {
+                dg.SetPixel(z.X, z.Y, Color.FromArgb((37 * d1[z]) % 255, (41 * d1[z]) % 255, (51 * d1[z]) % 255));
+            }
+
+            return dg;
+        }
+
+        //共面四个点的姿态评估:
+        private void button31_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("Q.png");
+            Graphics g = Graphics.FromImage(pbOutput.Image);
+
+            // points of real object - model
+            Vector3[] copositObject = new Vector3[4] {
+              new Vector3( -1000f, -1000f, 0 ),
+              new Vector3( 1000f, -1000f , 0),
+              new Vector3( 1000f, 1000f, 0 ),
+              new Vector3( -1000f, 1000f, 0 ),
+
+             };
+
+            // focal length of camera used to capture the object 
+            float focalLength = 180;
+            // depends on your camera or projection system 
+            // initialize CoPOSIT object 
+            AForge.Math.Geometry.CoplanarPosit coposit = new AForge.Math.Geometry.CoplanarPosit(copositObject, focalLength);
+
+            // 2D points of te object - projection 
+
+            AForge.Point center = new AForge.Point(435, 401);
+
+            AForge.Point[] projectedPoints = new AForge.Point[4] {
+             new AForge.Point( 212,247 ),
+             new AForge.Point( 673,247 ),
+             new AForge.Point( 823,577 ),
+             new AForge.Point( 35,577 ), };
+
+
+            AForge.Point[] ps2 = new AForge.Point[4] {
+             new AForge.Point( 212-center.X,247 -center.Y),
+             new AForge.Point( 673-center.X,247 -center.Y),
+             new AForge.Point( 823-center.X,577-center.Y ),
+             new AForge.Point( 35-center.X,577-center.Y ), };
+
+
+            // estimate pose 
+            Matrix3x3 rotationMatrix;
+            Vector3 translationVector;
+            coposit.EstimatePose(ps2, out rotationMatrix, out translationVector);
+
+            //for show:
+            string s = "平移量(x,y,z)是:\r\n";
+            s += string.Format("{0:#.####},{1:#.####},{2:#.####}", translationVector.X, translationVector.Y, translationVector.Z);
+            s += "\r\n旋转矩阵:";
+            s += string.Format("\r\n{0:#.####},{1:#.####},{2:#.####}", rotationMatrix.V00, rotationMatrix.V01, rotationMatrix.V02);
+            s += string.Format("\r\n{0:#.####},{1:#.####},{2:#.####}", rotationMatrix.V10, rotationMatrix.V11, rotationMatrix.V12);
+            s += string.Format("\r\n{0:#.####},{1:#.####},{2:#.####}", rotationMatrix.V20, rotationMatrix.V21, rotationMatrix.V22);
+
+            //Draw :
+            Brush brush = new SolidBrush(Color.FromArgb(255, 0, 0));
+            Pen pen = new Pen(brush, 4);
+            for (int i = 0; i < 4; i++)
+            {
+                g.FillEllipse(brush, projectedPoints[i].X - 5, projectedPoints[i].Y - 5, 10, 10);
+            }
+            brush = new SolidBrush(Color.FromArgb(155, 0, 150));
+
+            for (int k = 0; k < 4; k++)
+            {
+                Vector3 pk = Matrix3x3.Multiply(rotationMatrix, new Vector3(copositObject[k].X / 3, copositObject[k].Y / 3, 1));
+                g.FillEllipse(brush, center.X + pk.X - 3 - k, center.Y + pk.Y - 3 - k, 6 + 2 * k, 6 + 2 * k);
+            }
+
+            brush = new SolidBrush(Color.FromArgb(0, 250, 150));
+
+            for (int k = 0; k < 4; k++)
+            {
+                Vector3 pk = Matrix3x3.Multiply(rotationMatrix.Inverse(), new Vector3(copositObject[k].X / 3, copositObject[k].Y / 3, 1));
+                g.FillEllipse(brush, center.X + pk.X - 3 - k, center.Y + pk.Y - 3 - k, 6 + 2 * k, 6 + 2 * k);
+
+            }
+
+            MessageBox.Show(s);
+
+            /*
+             The class implements an algorithm for 3D object's pose estimation from it's 2D coordinates obtained by perspective projection, 
+             * when the object is described coplanar points.  
+             * The idea of the implemented math and algorithm is described in "Iterative Pose Estimation using Coplanar Feature Points" paper written by Oberkampf, 
+             * Daniel DeMenthon and Larry Davis (the implementation of the algorithm is very close translation of the pseudo code given by the paper, 
+             * so should be easy to follow).
+
+             * At this point the implementation works only with models described by 4 points, 
+             * which is the minimum number of points enough for 3D pose estimation.
+             * The 4 model's point are supposed to be coplanar, i.e. supposed to reside all within same planer. 
+             * See AForge.Math.Geometry.Posit for none coplanar case.
+             * Read 3D Pose Estimation article for additional information and samples.
+Sample usage:
+            // points of real object - model
+             * Vector3[] copositObject = new Vector3[4] { 
+             * new Vector3( -56.5f, 0, 56.5f ), 
+             * new Vector3( 56.5f, 0, 56.5f ), 
+             * new Vector3( 56.5f, 0, -56.5f ), 
+             * new Vector3( -56.5f, 0, -56.5f ), }; 
+             * 
+             * // focal length of camera used to capture the object 
+             * float focalLength = 640; 
+             * // depends on your camera or projection system 
+             * // initialize CoPOSIT object 
+             * CoplanarPosit coposit = new CoplanarPosit( copositObject, focalLength ); 
+             * 
+             * // 2D points of te object - projection 
+             * 
+             * AForge.Point[] projectedPoints = new AForge.Point[4] {
+             * new AForge.Point( -77, 48 ), 
+             * new AForge.Point( 44, 66 ), 
+             * new AForge.Point( 75, -36 ), 
+             * new AForge.Point( -61, -58 ), }; 
+             * 
+             * // estimate pose 
+             * Matrix3x3 rotationMatrix; 
+             * Vector3 translationVector; 
+             * coposit.EstimatePose( projectedPoints, out rotationMatrix, out translationVector );
+             */
+        }
+
+        //绘制各图形的凸包(凸多边形):
+        private void button32_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("313.png");
+            Graphics g = Graphics.FromImage(pbOutput.Image);
+
+            AForge.Math.Geometry.GrahamConvexHull gc = new AForge.Math.Geometry.GrahamConvexHull();
+            System.Collections.Generic.List<IntPoint> points = new List<IntPoint>();
+
+            button10_Click(sender, e);//平滑化+二值化
+
+            Bitmap bmpSrc = (Bitmap)pbOutput.Image;
+            int width = bmpSrc.Width, height = bmpSrc.Height;
+            Bitmap output = new Bitmap(width, height);
+            int d = 2; int k = 0;
+
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastSrc = new FastBitmap(bmpSrc))
+
+                //用"并行+指针"方式处理图像:                
+                //Parallel.For(d, height - d, j =>
+
+                //为应用字典,用普通的循环方式:
+                for (int j = d; j < height - d; j += d)
+                {
+                    //各像素处理:
+                    for (int i = d; i < width - d; i += d)
+                    {
+                        Byte b1 = fastSrc.GetColor(i - d, j).G;
+                        Byte b2 = fastSrc.GetColor(i + d, j).G;
+                        Byte b3 = fastSrc.GetColor(i, j - d).G;
+                        Byte b4 = fastSrc.GetColor(i, j + d).G;
+
+                        double v = Math.Abs(b2 - b1) + Math.Abs(b4 - b3);
+                        if (v >= 120)
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(0, 0, 0));
+                            //if (!d0.ContainsKey(new Point(i, j))) 
+                            d0.Add(new Point(i, j), k); k++;
+                        }
+                        else
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(55, 55, 55));
+
+                        }
+                    }
+                }
+            //});
+            MessageBox.Show("D0.Count=" + k);
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 5;//不同聚类之间的距离
+            int m = 0;//聚类的编号
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - q * 41 % 256, q * 71 % 256)), 4),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+
+            //四,绘制各图形的凸包(凸多边形):
+            IEnumerable<Point> qs;
+            foreach (var z in d1.Values)
+            {
+                points = new List<IntPoint>();
+                qs = d1.Where(o => o.Value == z).Select(o => o.Key);
+                foreach (var zm in qs)
+                {
+                    points.Add(new IntPoint(zm.X, zm.Y));
+                }
+                if (qs.Count() > 5)
+                {
+                    System.Collections.Generic.List<IntPoint> gp = gc.FindHull(points);
+                    Point[] ps2 = new Point[gp.Count];
+                    for (int j = 0; j < gp.Count; j++)
+                    {
+                        ps2[j] = new Point(gp[j].X, gp[j].Y);
+                    }
+                    g.DrawPolygon(new Pen(new SolidBrush(Color.FromArgb(255 - z * 37 % 256, z * 41 % 256, 255 - z * 71 % 256))), ps2);
+
+                }
+            }
+            pbOutput.Image = output;
+        }
+
+        //项氏直线识别:
+        private void button33_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("bmp_ (10).bmp");
+            contour();
+
+            //方法2:项氏对称算法找直线:=======================================
+            Bitmap output = mkImg02();
+            pbOutput.Image = output;
+
+            this.Text = "DP.Count=" + DP.Count;
+        }
+        //边缘化:
+        void contour()
+        {
+
+            Bitmap bmp1 = (Bitmap)pbOutput.Image;
+            picW = bmp1.Width;//bmpfile图片文件之宽度
+            picH = bmp1.Height;//bmpfile图片文件之高度
+            xy = new bool[picH, picW];//默认内容全部是:false
+
+            //方法1:一般用法:=======================================
+            Bitmap output = mkImg01(bmp1);
+            pbOutput.Image = output;
+            MessageBox.Show("边缘化完成!");
+
+
+            /*
+             ////方法2:用工厂级任务完成:================================
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            Task.Factory.StartNew(delegate
+            {
+                Bitmap output = mkImg01(bmp1);//调用运算函数
+                return new { output };//返回:output
+            }).ContinueWith(t =>
+            {
+                pbOutput.Image = t.Result.output;//更新线程外UI
+                MessageBox.Show("边缘化完成!");
+            }, uiScheduler);
+           */
+            //
+        }
+
+        //使用FastBitmap边缘化:
+        Bitmap mkImg01(Bitmap bmpSrc)
+        {
+            int width = bmpSrc.Width, height = bmpSrc.Height;
+            Bitmap output = new Bitmap(width, height);
+            int d = 1;
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastSrc = new FastBitmap(bmpSrc))
+
+                //用"并行+指针"方式处理图像:                
+                Parallel.For(d, height - d, j =>
+                {
+                    //各像素处理:
+                    for (int i = d; i < width - d; i++)
+                    {
+                        Byte b1 = fastSrc.GetColor(i - d, j).G;
+                        Byte b2 = fastSrc.GetColor(i + d, j).G;
+                        Byte b3 = fastSrc.GetColor(i, j - d).G;
+                        Byte b4 = fastSrc.GetColor(i, j + d).G;
+
+                        double v = Math.Abs(b2 - b1) + Math.Abs(b4 - b3);
+                        if (v >= 120)
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(0, 0, 0));
+                            xy[j, i] = true;
+                        }
+                        else
+                        {
+                            fastOut.SetColor(i, j, Color.FromArgb(255, 255, 255));
+                            xy[j, i] = false;
+                        }
+                    }
+                });
+            return output;
+        }
+
+        //项氏对称算法找直线---将对称中心转存为字典:
+        Bitmap mkImg02()
+        {
+            bool[] b = new bool[360];
+            Bitmap output = new Bitmap(picW, picH);
+            int r = 100;
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+
+                for (int i = r; i < picW - r; i++)
+                {
+                    for (int j = r; j < picH - r; j++)
+                    {
+
+                        if (xy[j, i])
+                        {
+                            for (int g = 0; g < 180; g++)
+                            {
+                                float gl = 6.2832f * g / 360f;
+                                double x1 = i + r * Math.Cos(gl);
+                                double y1 = j + r * Math.Sin(gl);
+
+                                double x2 = i - r * Math.Cos(gl);
+                                double y2 = j - r * Math.Sin(gl);
+
+                                b[g] = xy[(int)y1, (int)x1] & xy[(int)y2, (int)x2];
+
+                                if (b[g])
+                                {
+                                    fastOut.SetColor(i, j, Color.FromArgb(255, 0, 0));
+                                    //将(DegreeAngle,x,y),即(k,i,j)作为参数,以生成[θ,ρ]群:
+                                    float ct = PI * (g / 180f - .5f);//精确值
+                                    int ro = (int)(i * Math.Cos(ct) + j * Math.Sin(ct));
+                                    ro = (int)((int)(ro / 10f) * 10);//精度为5像素 到原点距离
+                                    ct = ((int)(ct * 120)) / 120f;//精度定为3度 
+                                    //装入集合中:
+                                    if (!DP.ContainsKey(new PointF(ct, ro))) DP.Add(new PointF(ct, ro), 1);
+                                    if (DP.ContainsKey(new PointF(ct, ro)))
+                                    {
+                                        DP[new PointF(ct, ro)]++;
+                                    }
+                                    break;
+                                }
+
+                            }
+                        }
+                    }
+                }
+
+
+
+            shwTxt();
+
+            return output;
+
+        }
+
+        //文本出示(生成文本文件与弹出显示):
+        private void shwTxt()
+        {
+            string txt = "方位角与直线到原点的距离:\r\nm.Value个:  [m.Key.X=ct , m.Key.Y=ro]\r\n";
+
+            var q = DP.OrderByDescending(o => o.Value);
+
+            foreach (var m in q.Take(8))
+            {
+                txt += m.Value + "个:  [" + (57.3 * m.Key.X) + "," + m.Key.Y + "]\r\n";
+            }
+
+            //生成文本文件：           
+            StreamWriter sw = new StreamWriter("CtRo.txt", false, System.Text.Encoding.GetEncoding("GBK"));
+            sw.Write(txt);
+            sw.Close();
+
+            Process.Start("notepad.exe", @"CtRo.txt");
+        }
+
+        //分形算法
+        private void button35_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte r = (byte)(fastStart.GetColor(x, y).R);
+                        byte g = (byte)(fastStart.GetColor(x, y).G);
+                        byte b = (byte)(fastStart.GetColor(x, y).B);
+
+
+                        double xx = x / (double)width, yy = y / (double)height, cx = 0, cy = 0;
+                        double[,] a = new double[5, 7]{
+                            { 0.195, -0.488, 0.344 ,0.433,0.4431 ,0.2452 ,0.25},
+                            { 0.462 ,0.414 ,-0.252 ,0.361, 0.2511, 0.5692 ,0.25},
+                            { -0.058, -0.07, 0.453 ,-0.111, 0.5976, 0.0969 ,0.25},
+                            { -0.035, 0.07, -0.469 ,-0.022, 0.4884, 0.5069 ,0.2},
+                            { -0.637, 0 ,0, 0.501, 0.8562 ,0.2513, 0.05},
+                            };
+                        double x1 = 0; double y1 = 0;
+                        for (int i = 0; i < 10; i++)
+                        {
+                            Random rd = new Random();
+                            double dd = rd.NextDouble();
+                            //MessageBox.Show(dd.ToString());
+                            if (dd <= 0.25)
+                            {
+                                cx = a[0, 0] * x1 + a[0, 1] * y1 + a[0, 4];
+                                cy = a[0, 2] * x1 + a[0, 3] * y1 + a[0, 5];
+                            }
+                            else if (dd > 0.25 && dd <= 0.5)
+                            {
+                                cx = a[1, 0] * x1 + a[1, 1] * y1 + a[1, 4];
+                                cy = a[1, 2] * x1 + a[1, 3] * y1 + a[1, 5];
+                            }
+                            else if (dd > 0.5 && dd <= 0.75)
+                            {
+                                cx = a[2, 0] * x1 + a[2, 1] * y1 + a[2, 4];
+                                cy = a[2, 2] * x1 + a[2, 3] * y1 + a[2, 5];
+                            }
+                            else if (dd > 0.75 && dd <= 0.95)
+                            {
+                                cx = a[3, 0] * x1 + a[3, 1] * y1 + a[3, 4];
+                                cy = a[3, 2] * x1 + a[3, 3] * y1 + a[3, 5];
+                            }
+                            else if (dd > 0.95 && dd <= 1)
+                            {
+                                cx = a[4, 0] * x1 + a[4, 1] * y1 + a[4, 4];
+                                cy = a[4, 2] * x1 + a[4, 3] * y1 + a[4, 5];
+                            }
+                            x1 = cx; y1 = cy;
+                            byte cr = (byte)(cx * r); byte cg = (byte)(cy * g); byte cb = (byte)(cr + cg + b);
+                            //MessageBox.Show(cr.ToString(), cg.ToString()); MessageBox.Show(cb.ToString());
+                            Color clr = Color.FromArgb(cr, cg, cb);
+                            //MessageBox.Show(y.ToString());
+                            fastOut.SetColor(x, y, clr);
+                            //fastOut.SetColor((int)cx, (int)cy, clr);
+                        }
+
+
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+        //傅里叶
+        private void button36_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("H.png");
+            Graphics g = Graphics.FromImage(pbOutput.Image);
+            int x0 = 4; int y0 = 2;
+
+            //元素数目应是2的N次方:
+            //AForge.Math.Complex[] data = new Complex[]{
+            //    new Complex(0,0),//1
+            //    new Complex(1,0.5),//2
+            //    new Complex(2,1),//3
+            //    new Complex(3,1.5),//4
+            //    new Complex(4,2),//5
+            //    new Complex(5,2.5),//6
+            //    new Complex(6,3),//7
+            //    new Complex(7,3.5),//8
+
+            //};
+            AForge.Math.Complex[] data ={
+                    new   AForge.Math.Complex  ( 0,7),
+                    new   AForge.Math.Complex  ( 1,7),
+                    new   AForge.Math.Complex  ( 2,7),
+                    new   AForge.Math.Complex  ( 3,7),
+                    new   AForge.Math.Complex  ( 4,7),
+                    new   AForge.Math.Complex  ( 5,7),
+                    new   AForge.Math.Complex  ( 6,7),
+                    new   AForge.Math.Complex  ( 7,7),
+                    new   AForge.Math.Complex  ( 8,2),
+                    new   AForge.Math.Complex  ( 9,2),
+                    new   AForge.Math.Complex  ( 10,2),
+                    new   AForge.Math.Complex  ( 11,2),
+                    new   AForge.Math.Complex  ( 12,2),
+                    new   AForge.Math.Complex  ( 13,2),
+                    new   AForge.Math.Complex  ( 14,2),
+                    new   AForge.Math.Complex  ( 15,2),
+            };
+
+            AForge.Math.FourierTransform.Direction direction = AForge.Math.FourierTransform.Direction.Forward;
+            AForge.Math.FourierTransform.FFT(data, direction);
+            Pen pen = new Pen(new SolidBrush(Color.FromArgb(55, 55, 100)), 1);
+            //初始
+            //for (int i = 0; i < 8; i++)
+            //{
+            //    int x = 50*i;
+            //    double xc = 50 * data[i].Re;// 200 * Math.Sin((x + 400) / 50) + 100 * Math.Sin(3 * (x + 400) / 50) + 50 * Math.Sin(5 * (x + 400) / 50) + 25 * Math.Sin(7 * (x + 400) / 50);
+            //    double yc =10 * data[i].Im; //200 * Math.Sin((y + 400) / 50) + 100 * Math.Sin(3 * (y + 400) / 50) + 50 * Math.Sin(5 * (y + 400) / 50) + 25 * Math.Sin(7 * (y + 400) / 50);
+
+            //    //------------Re-----------------
+            //    g.DrawLine(pen, new Point(0, 60), new Point(500, 60));//x
+            //    g.DrawLine(pen, new Point(x, 60), new Point(x, 60 + (int)xc));
+            //    //g.DrawString("Re", new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.BlueViolet), new PointF(50 * 16, 200 - 20));
+            //    //------------Im-----------------
+            //    g.DrawLine(pen, new Point(0, 160), new Point(500, 160));//y
+            //    g.DrawLine(pen, new Point(x, 160), new Point(x, 160 + (int)yc));
+            //    //g.DrawString("Im", new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.BlueViolet), new PointF(50 * 16, 600 - 20));
+            //}
+
+            //傅里叶
+            //for (double j = 0; j < 8; j += 0.01)
+            //{
+            //    for (int i = 1; i < 8; i++)
+            //    {
+            //        double x = 20 * data[i].Re;
+            //        double y = 10 * data[i].Im;
+            //        double xc = 100 * Math.Sin((x + 100) / 50) + 50 * Math.Sin(3 * (x + 100) / 50) + 25 * Math.Sin(5 * (x + 100) / 50) + 15 * Math.Sin(7 * (x + 100) / 50) + 7 * Math.Sin(9 * (x + 100) / 50) + 3 * Math.Sin(11 * (x + 100) / 50) + 2 * Math.Sin(13 * (x + 100) / 50) + Math.Sin(15 * (x + 100) / 50);
+            //        double yc = 100 * Math.Sin((y + 100) / 50) + 50 * Math.Sin(3 * (y + 100) / 50) + 25 * Math.Sin(5 * (y + 100) / 50) + 15 * Math.Sin(7 * (y + 100) / 50) + 7 * Math.Sin(9 * (y + 100) / 50) + 3 * Math.Sin(11 * (y + 100) / 50) + 2 * Math.Sin(13 * (y + 100) / 50) + Math.Sin(15 * (y + 100) / 50);
+            //        //------------Re-----------------
+            //        g.DrawLine(pen, new Point(0, 60), new Point(500, 60));//x
+            //        g.DrawLine(pen, new Point((int)(50 * i), 60), new Point((int)(50 * i), 60 + (int)xc));
+            //        //------------Im-----------------
+            //        g.DrawLine(pen, new Point(0, 160), new Point(500, 160));//y
+            //        g.DrawLine(pen, new Point((int)(50 * i), 160), new Point((int)(50 * i), 160 + (int)yc));
+            //    }
+            //}
+
+            float w; int N = data.Length;
+            for (float u = 1; u < N; u += .1f)//
+            {
+                double h = data[0].Re / 2f; double m = data[0].Im / 2f; double hg = 0;
+                for (int n = 1; n < N; n++)
+                {
+                    w = 2 * 3.1416f * (2 * n + 1) / (2 * N);
+                    h += 10 * data[n].Re * Math.Cos(u * w);
+                    w = 2 * 3.1416f * (2 * n) / (2 * N);
+                    m += 10 * data[n].Im * Math.Sin(u * w);
+                    hg = h + m;
+                    //------------Re-----------------
+                    g.DrawLine(pen, new Point(0, 60), new Point(1000, 60));//x
+                    g.DrawLine(pen, new Point((int)(50 * u), 60), new Point((int)(50 * u), 60 + (int)h));
+                    //------------Im-----------------
+                    g.DrawLine(pen, new Point(0, 160), new Point(10400, 160));//y
+                    g.DrawLine(pen, new Point((int)(50 * u), 160), new Point((int)(50 * u), 160 + (int)m));
+
+                }
+                double x = u - 1;
+
+            }
+
+
+            ////平移后
+            //for (int i = 0; i < 8; i++)
+            //{
+            //    if (i <= 4)
+            //    {
+            //        data[i].Re += x0; data[i].Im += y0;
+            //    }
+            //    else
+            //    {
+            //        data[i].Re -= x0; data[i].Im -= y0;
+            //    }
+            //}
+            //for (int i = 0; i < 8; i++)
+            //{
+            //    double xc = 20 * data[i].Re; double yc = 10 * data[i].Im;
+
+            //    //------------Re-----------------
+            //    g.DrawLine(pen, new Point(0, 500), new Point(500, 500));//x
+            //    g.DrawLine(pen, new Point(50 * i, 500), new Point(50 * i, 500 + (int)xc));
+            //    //g.DrawString("Re", new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.BlueViolet), new PointF(50 * 16, 200 - 20));
+            //    //------------Im-----------------
+            //    g.DrawLine(pen, new Point(0, 600), new Point(500, 600));//y
+            //    g.DrawLine(pen, new Point(50 * i, 600), new Point(50 * i, 600 + (int)yc));
+            //    //g.DrawString("Im", new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.BlueViolet), new PointF(50 * 16, 600 - 20));
+            //}
+
+
+        }
+
+
+
+        //简易形状的识别:
+        private void button34_Click(object sender, EventArgs e)
+        {
+            //pbOutput.Image = Bitmap.FromFile("313.png");
+            pbOutput.Image = new Bitmap(800, 600);
+            Graphics g = Graphics.FromImage(pbOutput.Image);
+
+
+            List<IntPoint> idealCicle = new List<IntPoint>();
+            List<IntPoint> distorredCircle = new List<IntPoint>();
+            System.Random rand = new System.Random();
+
+            // generate sample circles: 
+            float radius = 100;
+            for (int i = 0; i < 360; i += 2)
+            {
+                float angle = (float)((float)i / 180 * System.Math.PI);
+                // add point to ideal circle: 
+                idealCicle.Add(new IntPoint((int)(radius * Math.Cos(angle)), (int)(radius * Math.Sin(angle))));
+                g.FillEllipse(new SolidBrush(Color.Blue), (int)(400 + radius * System.Math.Cos(angle)), (int)(300 + radius * System.Math.Sin(angle)), 4, 4);
+                // add a bit distortion for distorred cirlce: 
+                float distorredRadius = radius + rand.Next(72) - 36;
+                distorredCircle.Add(new IntPoint((int)(distorredRadius * System.Math.Cos(angle)), (int)(distorredRadius * System.Math.Sin(angle))));
+                g.FillEllipse(new SolidBrush(Color.Red), (int)(400 + distorredRadius * System.Math.Cos(angle)), (int)(300 + distorredRadius * System.Math.Sin(angle)), 4, 4);
+            }
+
+            // check shape : 
+            AForge.Math.Geometry.SimpleShapeChecker shapeChecker = new AForge.Math.Geometry.SimpleShapeChecker();
+            if (shapeChecker.IsCircle(idealCicle))
+            {
+                MessageBox.Show("idealCicle OK !");
+            }
+            if (shapeChecker.CheckShapeType(distorredCircle) == AForge.Math.Geometry.ShapeType.Circle)
+            {
+                MessageBox.Show("distorredCircle OK !");
+            }
+            else
+            {
+                MessageBox.Show("distorredCircle is others !");
+            }
+
+
+        }
+
+
+        //2.jpg RGB均值标准差
+        private void button37_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("2.jpg");
+            Bitmap bmp1 = (Bitmap)pbOutput.Image;
+            int ww = bmp1.Width; int hh = bmp1.Height;
+
+            //用工厂级任务完成:================================
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            Task.Factory.StartNew(delegate
+            {
+                Bitmap output = BlendImages5(bmp1, ww, hh);//调用运算函数
+                return new { output };//返回:output
+            }).ContinueWith(t =>
+            {
+                pbOutput.Image = t.Result.output;//更新线程外UI
+            }, uiScheduler);
+        }
+
+        internal unsafe static Bitmap BlendImages5(Bitmap start, int width, int height)
+        {
+
+
+            Bitmap output = new Bitmap(width, height);
+            int xh = width * height;
+            int[,] x = new int[height, width]; int[,] y = new int[height, width]; int[,] z = new int[height, width];
+            int[] szx = new int[xh]; int[] szy = new int[xh]; int[] szz = new int[xh];
+            double r = 0; double g = 0; double b = 0;
+
+            //创建FastBitmap对象(均值):
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+
+                    //各像素处理:
+                    for (int i = 0; i < width; i++)
+                    {
+                        x[j, i] = srcPixel->R;
+                        y[j, i] = srcPixel->G;
+                        z[j, i] = srcPixel->B;
+                        szx[j * width + i] = x[j, i];
+                        szy[j * width + i] = y[j, i];
+                        szz[j * width + i] = z[j, i];
+                        //指针移动:
+                        outPixel++;
+                        srcPixel++;
+                    }
+                });
+
+            //均值
+            double avgR = szx.Average();
+            double avgG = szy.Average();
+            double avgB = szz.Average();
+
+            MessageBox.Show(avgR.ToString());
+            MessageBox.Show(avgG.ToString());
+            MessageBox.Show(avgB.ToString());
+
+
+            //创建FastBitmap对象（标准差）:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+            {
+                //扫描行的指针:
+                PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+
+                //double avgR = (srcPixel->R).Average();
+                //各像素处理:
+                for (int i = 0; i < width; i++)
+                {
+                    r = r + (srcPixel->R - avgR) * (srcPixel->R - avgR);
+                    g = g + (srcPixel->G - avgG) * (srcPixel->G - avgG);
+                    b = b + (srcPixel->B - avgB) * (srcPixel->B - avgB);
+                    //指针移动:
+                    outPixel++;
+                    srcPixel++;
+                }
+            });
+            double bzcr = Math.Sqrt((1 / xh) * r);
+            double bzcg = Math.Sqrt((1 / xh) * g);
+            double bzcb = Math.Sqrt((1 / xh) * b);
+
+            MessageBox.Show(bzcr.ToString());
+            MessageBox.Show(bzcg.ToString());
+            MessageBox.Show(bzcb.ToString());
+            return output;
+        }
+
+        //1.png 一阶导数二阶导数
+        private void button38_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("1.png");
+            //button17_Click(sender, e);//边缘化-->分组统计
+            //button18_Click(sender, e);//区块化-->分组统计
+            int d = 3;
+            Bitmap start = (Bitmap)pbOutput.Image;
+            Dictionary<Point, int> d0 = new Dictionary<Point, int>();
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = d; x < width - d; x += d)
+                {
+                    for (int y = d; y < height - d; y += d)
+                    {
+                        int fm = 0; int xb = 0, yb = 0;
+                        for (int u = -d; u < d; u++)
+                        {
+                            for (int v = -d; v < d; v++)
+                            {
+                                if (fastStart.GetColor(x + u, y + v).G == 0)
+                                {
+                                    xb += x + u;
+                                    yb += y + v;
+                                    fm++;
+
+                                    Color clr = Color.FromArgb(0, 0, 200);
+                                    fastOut.SetColor(x + u, y + v, clr);
+                                }
+                            }
+                        }
+
+                        if (fm > 1.5 * d * d)
+                        {
+                            Color clr = Color.FromArgb(255, 255, 255);
+                            fastOut.SetColor(xb / fm, yb / fm, clr);
+                            if (!d0.ContainsKey(new Point(xb / fm, yb / fm))) d0.Add(new Point(xb / fm, yb / fm), 0);
+                        }
+                    }
+                }
+            pbOutput.Image = output;
+
+            //二,生成有序点集d1---双层循环距离对比算法:
+            Dictionary<Point, int> d1 = new Dictionary<Point, int>();//字典,用于记录新的集合
+            Stack<Point> STK = new Stack<Point>();//堆栈,用于记下当前点的邻近的点
+            int sx = 0; int sy = 0; int sz = 0; //搜索的开始点
+            STK.Push(new Point(0, 0));// 堆栈初始点
+            int xg = 0xffffff; int yg = 0xffffff; //记录搜索时的最近点,初始时,应移动搜索区间之外
+            double disMin = 0xffffff; //记录最近距离
+            double dis;//计算当前距离
+            double dMaxForSplit = 5;//不同聚类之间的距离
+            int m = 0;//聚类的编号
+
+            //迭代搜索:
+            while (d0.Count > 0)
+            {
+                if (d0.ContainsKey(new Point(sx, sy))) d0.Remove(new Point(sx, sy));
+                foreach (Point u in d0.Keys)
+                {
+                    int xi = u.X;
+                    int yi = u.Y;
+
+                    dis = Math.Sqrt((xi - sx) * (xi - sx) + (yi - sy) * (yi - sy));
+                    if (dis <= disMin)
+                    {
+                        disMin = dis; //更新最近距离值
+                        xg = xi; yg = yi; //更新搜索时的最近点
+                        if (dis < dMaxForSplit)
+                        {
+                            STK.Push(u);//符合聚类之间的距离的,先压入到堆栈中
+                        }
+                    }
+                }
+
+                //预搬运,以提高速度:
+                if (STK.Count > 0)
+                {
+                    foreach (var u in STK)
+                    {
+                        d0.Remove(u);
+                        if (!d1.ContainsKey(u)) d1.Add(u, m);
+                    }
+                }
+
+                if (disMin <= dMaxForSplit)//符合聚类之间的距离的,更新到D1中,继续
+                {
+                    sx = xg; sy = yg;
+                    if (!d1.ContainsKey(new Point(xg, yg))) d1.Add(new Point(xg, yg), m);
+                }
+                else //不符合聚类之间的距离的,到堆栈中取出一元,继续
+                {
+                    if (STK.Count > 0)
+                    {
+                        Point Pg = STK.Pop();
+                        sx = Pg.X; sy = Pg.Y;
+                    }
+                }
+
+                //当距离超过聚类之间的距离,且堆栈也空时,新一聚类开始:
+                if (disMin > dMaxForSplit && STK.Count == 0)
+                {
+                    m++; sx = xg; sy = yg;
+                }
+
+                disMin = 0xffffff; //最近距离初始化
+            }
+            //MessageBox.Show("D1.Count=" + d1.Count + ",分类数目Group=" + m);
+
+            //三,绘制D1:
+            /**/
+            Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+            int idx = 0; Point pLst = new Point(width / 2, height / 2); Point pCrt;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                if (idx > 0)
+                {
+                    pCrt = z.Key;
+                    g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), 4),
+                        pLst, pCrt);
+                    pLst = pCrt;
+                }
+                idx++;
+            }
+            pbOutput.Image = output;
+
+
+            /*
+            
+            */
+            //pbOutput.Image = Bitmap.FromFile("Lines.png");
+            //Graphics g = Graphics.FromImage(pbOutput.Image); // this.pbOutput.CreateGraphics();
+            //g.DrawLine(new Pen(new SolidBrush(Color.Red)), new Point(0, 0), new Point(width,height));
+
+            //四,绘制斜率与曲率,以点集画之:
+            Queue<Point> qp = new Queue<Point>(20); int id = 0;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    //一阶方向导数:
+                    g.FillEllipse(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), (int)(id / 3.6), 300 + (int)(3 * (3.2 + Math.Atan2((crt.Y - fst.Y), (crt.X - fst.X)))), 2, 2);
+                    //二阶方向导数:
+                    if ((crt.X + fst.X - 2 * mid.X) != 0) g.FillEllipse(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), (int)(id / 3.6), 500 + (int)(8 * (3.2 + Math.Atan2((crt.Y - mid.Y), (crt.X - mid.X))) - 8 * (3.2 + Math.Atan2((mid.Y - fst.Y), (mid.X - fst.X)))), 2, 2);
+                }
+                id++;
+            }
+
+            //以细线画之.一阶方向导数:
+            id = 0; int id2 = 0; int x0 = 0, y0 = 0, xk, yk;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                Pen pen = new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), 2);
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    if (id2 == 0)
+                    {
+                        x0 = (int)(id / 3.6); y0 = 300 + (int)(3 * (3.2 + Math.Atan2((crt.Y - fst.Y), (crt.X - fst.X))));
+                    }
+                    else
+                    {
+                        xk = (int)(id / 3.6); yk = 300 + (int)(3 * (3.2 + Math.Atan2((crt.Y - fst.Y), (crt.X - fst.X))));
+                        g.DrawLine(pen, new Point(x0, y0), new Point(xk, yk));
+                        x0 = xk; y0 = yk;
+                    }
+                    id2++;
+                }
+                id++;
+            }
+
+            //以细线画之.二阶方向导数:
+            id = 0; id2 = 0; x0 = 0; y0 = 0;
+            foreach (var z in d1)
+            {
+                var q = z.Value;
+                Pen pen = new Pen(new SolidBrush(Color.FromArgb(q * 37 % 256, 255 - 59 * q % 256, q * 71 % 256)), 2);
+                qp.Enqueue(z.Key);
+                if (qp.Count == 20)
+                {
+
+                    Point fst = qp.Last();
+                    Point mid = qp.ElementAt(10);
+                    Point crt = qp.Dequeue();
+                    if (id2 == 0)
+                    {
+                        x0 = (int)(id / 3.6); y0 = 500 + (int)(8 * (3.2 + Math.Atan2((crt.Y - mid.Y), (crt.X - mid.X))) - 8 * (3.2 + Math.Atan2((mid.Y - fst.Y), (mid.X - fst.X))));
+                    }
+                    else
+                    {
+                        xk = (int)(id / 3.6); yk = 500 + (int)(8 * (3.2 + Math.Atan2((crt.Y - mid.Y), (crt.X - mid.X))) - 8 * (3.2 + Math.Atan2((mid.Y - fst.Y), (mid.X - fst.X))));
+                        g.DrawLine(pen, new Point(x0, y0), new Point(xk, yk));
+                        x0 = xk; y0 = yk;
+                    }
+                    id2++;
+                }
+                id++;
+            }
+
+            //五,简易地统计:
+            string s = "简易地统计\r\n";
+            for (int i = 1; i <= m; i++)
+            {
+
+                var xAvg = d1.Where(o => o.Value == i).Average(o => o.Key.X);
+                var yAvg = d1.Where(o => o.Value == i).Average(o => o.Key.Y);
+                //中心处画圆:
+                g.FillEllipse(
+                       new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg - 5, 10, 10);
+                s += i + "#: xAvg=" + xAvg + ", yAvg=" + yAvg + "\r\n";
+
+                //计算范围边界:
+                var xMax = d1.Where(o => o.Value == i).Max(o => o.Key.X);
+                var yMax = d1.Where(o => o.Value == i).Max(o => o.Key.Y);
+                var xMin = d1.Where(o => o.Value == i).Min(o => o.Key.X);
+                var yMin = d1.Where(o => o.Value == i).Min(o => o.Key.Y);
+                //绘制四边:
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMin, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMax), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMax, yMin), new Point(xMax, yMax));
+                g.DrawLine(
+                        new Pen(new SolidBrush(Color.FromArgb(i * 37 % 256, 255 - i * 41 % 256, i * 71 % 256)), 1),
+                        new Point(xMin, yMin), new Point(xMax, yMin));
+                //序号与数目(面积):
+                var count = d1.Where(o => o.Value == i).Count();
+                g.DrawString(i + "#:" + count.ToString(), new Font(new FontFamily("Arial"), 10), new SolidBrush(Color.FromArgb(255, 255, 255)),
+                        (int)xAvg - 5, (int)yAvg + 15);
+            }
+        }
+
+
+        //3.jpeg 反色处理
+        private void button39_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("3.jpeg");
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        Color c1 = fastStart.GetColor(x, y);
+                        Color c2 = Color.FromArgb(255 - c1.R, 255 - c1.G, 255 - c1.B);
+
+                        fastOut.SetColor(x, y, c2);
+
+                    }
+
+                }
+            pbOutput.Image = output;
+        }
+
+
+
+        //4.jpeg 轮廓化边缘化
+        private void button40_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("4.jpeg");
+            Bitmap start = (Bitmap)pbOutput.Image;
+
+            int width = start.Width, height = start.Height;
+            Bitmap output = new Bitmap(width, height);
+
+            //创建FastBitmap对象:
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+                //通过二层循环处理颜色：
+                for (int x = 1; x < width - 1; x++)
+                {
+                    for (int y = 1; y < height - 1; y++)
+                    {
+                        byte c1 = fastStart.GetColor(x - 1, y - 1).G;
+                        byte c2 = fastStart.GetColor(x - 1, y + 1).G;
+                        byte c3 = fastStart.GetColor(x + 1, y + 1).G;
+                        byte c4 = fastStart.GetColor(x + 1, y - 1).G;
+
+                        byte cc = (byte)(c1 ^ c3 | c2 ^ c4);
+
+                        Color clr = Color.FromArgb(cc, cc, cc);
+
+                        fastOut.SetColor(x, y, clr);
+                    }
+                }
+            pbOutput.Image = output;
+        }
+
+
+        //5.jpg 膨胀与腐蚀
+        private void button41_Click(object sender, EventArgs e)
+        {
+            //pbOutput.Image = Bitmap.FromFile("5.jpg");
+            Image<Gray, Byte> img = new Image<Gray, byte>("5.jpg");
+            this.pbOutput.Image = img.Bitmap;
+            Image<Gray, Byte> img0 = img.Dilate(5);//膨脹
+            Image<Gray, Byte> img1 = img0.Erode(5);//侵蝕
+            this.pbOutput.Image = img1.Bitmap;
+        }
+
+
+        //6.bmp 产品参数提取
+        private void button42_Click(object sender, EventArgs e)
+        {
+            //pbOutput.Image = Bitmap.FromFile("6.bmp");
+            Image<Gray, Byte> img = new Image<Gray, byte>("6.bmp");
+            Image<Gray, Byte> img0 = img.Dilate(10);//膨脹
+            Image<Gray, Byte> img1 = img0.Erode(10);//侵蝕
+            this.pbOutput.Image = img1.Bitmap;
+
+            double[] L2S = new double[100];
+            double[] L2Sa = new double[100];
+
+            #region Blobs
+            Emgu.CV.Cvb.CvBlobs bbs = new Emgu.CV.Cvb.CvBlobs();
+            Emgu.CV.Cvb.CvBlobDetector bd = new Emgu.CV.Cvb.CvBlobDetector();
+            uint n = bd.Detect(img1, bbs);
+
+            //连通域配色:
+            Emgu.CV.Image<Bgr, byte> src2 = bd.DrawBlobs(img1, bbs, Emgu.CV.Cvb.CvBlobDetector.BlobRenderType.Color, 2);
+
+            //this.Text = "找到连通域" + bbs.Count + "个";
+            int Num = 100; double[] iR1 = new double[Num]; double[] iR = new double[Num];
+            int gd = 0; int min = 999999;
+            int A1 = 0, A2 = 0;
+            //遍历各域:
+            for (uint i = 1; i <= bbs.Count; i++)
+            {
+
+                /*######################  一,  编号,质心,面积      #############################*/
+                uint lb = bbs[i].Label;//获取编号
+                PointF org = bbs[i].Centroid;//获取质心
+                float xOrg = org.X; float yOrg = org.Y;
+                int area = bbs[i].Area;//获取面积
+                Rectangle rect = bbs[i].BoundingBox;//获取矩形(X-Y方向)
+                //绘制矩形(X-Y方向边框):
+                CvInvoke.Rectangle(src2, rect, new MCvScalar(125, 0, 0), 1);
+
+                if (area > 100000)
+                {
+                    //    ///*######################    二, 域块的矩    #############################*/
+                    //    //Emgu.CV.Cvb.CvBlob.Moments mBlob = bbs[i].BlobMoments;//获取矩
+                    //    ////mBlob属性有Mxx,Nxx,Pxx三类,  详见"EmguCV 轮廓匹配.htm"介绍
+
+                    ///*######################    三, 轮廓,最小外接矩形,长边/短边,倾斜角    #############################*/
+                    //Point[] ctr0 = bbs[1].GetContour();//获取轮廓
+                    //Point[] ctr = bbs[i].GetContour();//获取轮廓
+
+                    ////获取最小外接矩形:
+                    //RotatedRect rr = CvInvoke.MinAreaRect(new VectorOfPoint(ctr));
+                    //PointF[] rp = rr.GetVertices();
+                    ////绘制矩形与标记：
+                    //Point p0 = new Point((int)rp[0].X, (int)rp[0].Y);
+                    //CvInvoke.PutText(src2, "@1", p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    //for (int k = 1; k < rp.Length; k++)
+                    //{
+                    //    Point p1 = new Point((int)rp[k - 1].X, (int)rp[k - 1].Y);
+                    //    Point p2 = new Point((int)rp[k].X, (int)rp[k].Y);
+                    //    CvInvoke.Line(src2, p1, p2, new MCvScalar(255, k * 55, 255 - k * 55), 2);//红为头，绿为尾
+                    //    CvInvoke.PutText(src2, string.Format("@{0}", k + 1), p2, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    //}
+                    //CvInvoke.PutText(src2, string.Format("{0}", i), p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 1.5, new MCvScalar(255, 255, 255), 3);
+                    //CvInvoke.Line(src2, new Point((int)rp[0].X, (int)rp[0].Y), new Point((int)rp[3].X, (int)rp[3].Y), new MCvScalar(255, 0, 255), 2);//红为头，绿为尾
+
+                    Emgu.CV.Cvb.CvBlob b0 = bbs[i];//获取当前域块
+                    Point[] iContour = b0.GetContour();//获取当前域块之轮廓
+                    int iLen = iContour.Length;//轮廓周长
+                    uint iLabel = bbs[i].Label;//获取当前域块之编号
+                    PointF iCentroid = bbs[i].Centroid;//获取当前域块之质心
+                    float xCentroid = iCentroid.X; float yCentroid = iCentroid.Y;//获取质心坐标
+                    int stp = iLen / Num;
+
+                    if (iLabel == 1)  //第一个轮廓作样品
+                    {
+
+                        for (int k = 0; k <= Num - 1; k++)
+                        {
+                            int p = k * stp;
+                            iR1[k] = Math.Sqrt((iContour[p].X - xCentroid) * (iContour[p].X - xCentroid) + (iContour[p].Y - yCentroid) * (iContour[p].Y - yCentroid));
+                            CvInvoke.Circle(src2, new Point(300 + 4 * k, 280 - (int)iR1[k]), 2, new MCvScalar(110, 255, 110));//动态曲线-1
+                            CvInvoke.Line(src2, new Point((int)xCentroid, (int)yCentroid), new Point(iContour[p].X, iContour[p].Y), new MCvScalar(100, k % 255, 100), 1);
+                        }
+                        //计算当前角度:
+                        CvInvoke.Circle(src2, iContour[0], 8, new MCvScalar(255, 255, 0), -1);//动态曲线-1的起始点
+                        A1 = (int)(57.3 * Math.Atan2(iContour[0].Y - yCentroid, iContour[0].X - xCentroid));
+
+                        //显示文本信息：
+                        CvInvoke.PutText(src2, string.Format("{0}#:[{1:0.0},{2:0.0}]", iLabel, xCentroid, yCentroid), new System.Drawing.Point(b0.BoundingBox.Right, b0.BoundingBox.Top), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                        CvInvoke.PutText(src2, "iLabel=" + iLabel + ", min=" + min + ", start Angle=" + A1, new System.Drawing.Point(b0.BoundingBox.Right, b0.BoundingBox.Top + 20), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+
+                    }
+                    else //其他各轮廓,都通过平移与样品作N维距离计算,选出最优:
+                    {
+                        //轮廓显示:
+                        for (int k = 0; k <= Num - 1; k++)
+                        {
+                            int p = k * stp;
+                            iR[k] = Math.Sqrt((iContour[p].X - xCentroid) * (iContour[p].X - xCentroid) + (iContour[p].Y - yCentroid) * (iContour[p].Y - yCentroid));
+                            CvInvoke.Circle(src2, new Point(300 + 4 * k, 400 - (int)iR[k]), 2, new MCvScalar(110, 215, 170));//动态曲线-2
+                            CvInvoke.Line(src2, new Point((int)xCentroid, (int)yCentroid), new Point(iContour[p].X, iContour[p].Y), new MCvScalar(100, k % 255, 100), 1);
+                        }
+
+                        //作移位与N维距离计算处理:
+                        string s = ""; int t = 0;
+                        for (int mv = 0; mv <= Num - 1; mv++)
+                        {
+                            //建立临时数组,前面的将割补到尾部拼接:
+                            double[] tmp = new double[Num];
+                            for (int j = mv; j < mv + Num; j++)
+                            {
+                                t = j % Num;
+                                tmp[j - mv] = iR[t];
+                            }
+                            //MessageBox.Show("iLabel=" + iLabel);
+
+                            //N维距离计算:
+                            int v = 0;//N维距离
+                            //if (Math.Abs(tmp[0] - iR1[0]) <= 2)//2个像素的误差,为快速处理初步筛选,但是输出不是差值曲线
+                            {
+                                for (int k = 0; k <= Num - 1; k++)
+                                {
+                                    v += (int)Math.Abs(tmp[k] - iR1[k]);
+                                }
+
+                                //总是记录最小值:
+                                if (v <= min)
+                                {
+                                    min = v;
+                                    gd = mv; //同时记下下标
+                                }
+                            }
+                            s += v + "|";
+                            CvInvoke.Circle(src2, new Point(300 + 4 * mv, 550 - v / 5), 2, new MCvScalar(0, 255, 0), 2);//动态曲线-2
+                        }
+                        //计算当前角度:
+                        CvInvoke.Line(src2, new Point((int)xCentroid, (int)yCentroid), new Point(iContour[gd * stp].X, iContour[gd * stp].Y), new MCvScalar(100, 0, 100), 1);
+                        A2 = (int)(57.3 * Math.Atan2(iContour[gd * stp].Y - yCentroid, iContour[gd * stp].X - xCentroid));
+
+                        //显示标记:
+                        CvInvoke.Circle(src2, new Point(300 + 4 * gd, 550 - min / 20), 4, new MCvScalar(120, 120, 250), 2);//曲线上的动态最佳点
+                        CvInvoke.Circle(src2, iContour[gd * stp], 8, new MCvScalar(255, 255, 0), -1);//图片上的动态最佳点
+                        CvInvoke.Circle(src2, iContour[0], 8, new MCvScalar(255, 255, 120), 2);//图片上的动态最佳点
+
+                        //显示文本信息：
+                        CvInvoke.PutText(src2, string.Format("{0}#:[{1:0.0},{2:0.0}]", iLabel, xCentroid, yCentroid), new System.Drawing.Point(b0.BoundingBox.Right, b0.BoundingBox.Top), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                        CvInvoke.PutText(src2, "iLabel=" + iLabel + ", min=" + min + ", A2=" + A2 + ", Angle(A2 - A1)=" + (A2 - A1), new System.Drawing.Point(b0.BoundingBox.Right, b0.BoundingBox.Top + 20), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                        CvInvoke.PutText(src2, "Here :", new Point(300 + 4 * gd - 25, 530 - min / 20), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    }
+
+
+                    ////计算:长边/短边: L2S=?
+                    //double L1 = Math.Sqrt((rp[0].X - rp[1].X) * (rp[0].X - rp[1].X) + (rp[0].Y - rp[1].Y) * (rp[0].Y - rp[1].Y));
+                    //double L2 = Math.Sqrt((rp[2].X - rp[1].X) * (rp[2].X - rp[1].X) + (rp[2].Y - rp[1].Y) * (rp[2].Y - rp[1].Y));
+                    //double Angle = 0; //double L2S = 0;
+
+                    ////MessageBox.Show(L2S[bbs.Count].ToString());
+                    //if (L1 >= L2)
+                    //{
+                    //    L2S[i] = L1 / L2;
+                    //    Angle = 57.3 * Math.Atan2(rp[0].Y - rp[1].Y, rp[0].X - rp[1].X);
+                    //    L2Sa[i] = L1 * L2;
+                    //}
+                    //else
+                    //{
+                    //    L2S[i] = L2 / L1;
+                    //    Angle = 57.3 * Math.Atan2(rp[2].Y - rp[1].Y, rp[2].X - rp[1].X);
+                    //    L2Sa[i] = L1 * L2;
+                    //}
+
+                    //MessageBox.Show(bbs.Count.ToString());
+                    //MessageBox.Show(L2S[i].ToString());
+                    //MessageBox.Show(L2Sa[i].ToString());
+
+
+
+                    /////*######################  四, 轮廓,  外凸包 , 半径集, R/r, avgR, stdR #############################*/
+                    //////1,形成稀疏半径集,计算半径均值,长半径/短半径,半径标准差:
+                    ////List<double> lp = new List<double>();//稀疏半径集
+                    ////for (int k = 5; k < ctr.Length; k += 5)
+                    ////{
+                    ////    Point p1 = ctr[k - 5];
+                    ////    Point p2 = ctr[k];
+                    ////    MCvScalar mc = new MCvScalar(255, k % 255, 255 - k % 255, 0);
+                    ////    CvInvoke.Line(src2, p1, p2, mc, 2);//红为头，绿为尾
+                    ////    CvInvoke.Circle(src2, p1, 3, mc, 4);
+                    ////    CvInvoke.Line(src2, new Point((int)xOrg, (int)yOrg), p2, mc, 2);//半径
+                    ////    double r = Math.Sqrt((p2.X - xOrg) * (p2.X - xOrg) + (p2.Y - yOrg) * (p2.Y - yOrg));
+                    ////    lp.Add(r);
+                    ////}
+                    ////CvInvoke.Line(src2, ctr[0], ctr[ctr.Length - 1], new MCvScalar(255, 0, 255), 2);
+
+                    //////2,半径均值,[长半径/短半径]比值,半径标准差,中心5点的深度或灰度值
+                    ////var avgR = lp.Average();
+                    ////var maxR = lp.Max(); var minR = lp.Min();
+                    ////double R2r = maxR / minR;
+
+                    //////求出半径标准差:
+                    //////先求平方和:
+                    ////double sum = lp.Sum(di => Math.Pow(di - avgR, 2));
+                    //////除以数量，然后开方:
+                    ////double stdR = Math.Sqrt(sum / (double)lp.Count());
+
+                    //////读取中心5点深度或灰度值:
+                    ////int x = (int)xOrg; int y = (int)yOrg; double zh00 = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg + 5; y = (int)yOrg + 5; double zhpp = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg + 5; y = (int)yOrg - 5; double zhpn = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg - 5; y = (int)yOrg - 5; double zhnn = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg - 5; y = (int)yOrg + 5; double zhnp = (img1.Data[y, x, 0]);
+                    ////double zh = (zh00 + zhpp + zhpn + zhnn + zhnp) / 5.0;
+
+                    /////*######################   五, 图形轮廓的匹配度    #############################*/
+                    ////double ms1 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I1);
+                    ////double ms2 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I2);
+                    ////double ms3 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I3);
+
+                    //    ////计算当前轮廓的矩,并根据二阶矩计算倾斜的角度:
+                    //    //MCvMoments mContour0 = CvInvoke.Moments(new VectorOfPoint(ctr0), false);//模板矩
+                    //    //MCvMoments mContour = CvInvoke.Moments(new VectorOfPoint(ctr), false);
+                    //    //double A0 = Math.Sign(mContour0.Mu11) * Math.Atan2(mContour0.Mu20, mContour0.Mu02) * 57.3;//模板倾斜角
+                    //    //double dltA = Math.Sign(mContour.Mu11) * Math.Atan2(mContour.Mu20, mContour.Mu02) * 57.3 - A0;//倾斜角[相对于模板]
+
+                    //    ////获取HU不变矩:
+                    //    //double[] hu = mContour.GetHuMoment();
+
+                    //    ///*######################   六, 显示    #############################*/
+                    //    ////一些为机器人用的特征参数--序号,倾斜角,质心坐标:
+                    //    //CvInvoke.PutText(src2, string.Format("Label:  {0}, Angle:{1:0.####}", (int)lb, -Angle), new System.Drawing.Point((int)org.X + 300, (int)org.Y), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("Centroid:  {0}, {1}", (int)org.X + 155, (int)org.Y), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 20), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+
+                    //    ////不进行缩放时的七不变矩(面积,轮廓周长,最小外接矩形的L2S,R/r,avgR,stdR,avgGray):
+                    //    //CvInvoke.PutText(src2, string.Format("Area:{0:0.####},Length:  {1}", area, ctr.Length), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 40), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("L2S:{0:0.####},R2r:{1:0.####}", L2S, R2r), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 60), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("avgR:{0:0.####},stdR:{1:0.####}", avgR, stdR), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 80), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("avgGray or avgDepth:{0:0.####}", zh), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 100), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 100, 100), 1);
+
+                    //    ////其他备用:
+                    //    //CvInvoke.PutText(src2, string.Format("MatchShapes= {0:0.####},{1:0.####},{2:0.####}", ms1, ms2, ms3), new System.Drawing.Point((int)org.X + 150, (int)org.Y + 120), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(55, 120, 50), 1);
+                    //    ////HU的七个不变矩:
+                    //    //CvInvoke.PutText(src2, string.Format("Contour_Hu[1...7]: {0:0.####},{1:0.####},{2:0.####},{3:0.####},{4:0.####},{5:0.####},{6:0.####}", hu[0], hu[1], hu[2], hu[3], hu[4], hu[5], hu[6]), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 140), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    ////二阶矩:
+                    //    //CvInvoke.PutText(src2, string.Format("Blobs U11,U02,U20:{0:0.####},{1:0.####},{2:0.####}", mBlob.U11, mBlob.U02, mBlob.U20), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 160), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("Contour mu11,mu20,mu02:  {0:0.####},{1:0.####},{2:0.####}", mContour.Mu11, mContour.Mu20, mContour.Mu02), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 180), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(155, 150, 150), 1);
+                    //    ////根据二阶矩计算倾斜的角度:
+                    //    //CvInvoke.PutText(src2, string.Format("AngleByMu:{0:0.####}", dltA), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 200), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(25, 220, 220), 1);
+
+                    //    ////还可以:"凸率(丰满度),圆度,惯性矩"等方面进行计算并处理识别匹配
+
+                }
+                //src2._Not();//红为尾，绿为头
+                #endregion Blobs
+                pbOutput.Image = src2.Bitmap;//输出到控件
+
+
+            }
+        }
+
+        //7.jpg 伪彩色处理
+        private void button43_Click(object sender, EventArgs e)
+        {
+            pbOutput.Image = Bitmap.FromFile("7.jpg");
+            Bitmap bmp1 = (Bitmap)pbOutput.Image;
+            int ww = bmp1.Width; int hh = bmp1.Height;
+
+            //用工厂级任务完成:================================
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            Task.Factory.StartNew(delegate
+            {
+                Bitmap output = BlendImages6(bmp1, ww, hh);//调用运算函数
+                return new { output };//返回:output
+            }).ContinueWith(t =>
+            {
+                pbOutput.Image = t.Result.output;//更新线程外UI
+            }, uiScheduler);
+        }
+
+        internal unsafe static Bitmap BlendImages6(Bitmap start, int width, int height)
+        {
+
+
+            Bitmap output = new Bitmap(width, height);
+            int xh = width * height;
+            int[,] x = new int[height, width]; int[,] y = new int[height, width]; int[,] z = new int[height, width];
+            int[] szx = new int[xh]; int[] szy = new int[xh]; int[] szz = new int[xh];
+            double r = 0; double g = 0; double b = 0;
+
+            //创建FastBitmap对象(均值):
+            using (FastBitmap fastOut = new FastBitmap(output))
+            using (FastBitmap fastStart = new FastBitmap(start))
+
+
+
+                //用"并行+指针"方式处理图像:
+                Parallel.For(0, height, j =>
+                {
+                    //扫描行的指针:
+                    PixelData* outPixel = fastOut.GetInitialPixelForRow(j);
+                    PixelData* srcPixel = fastStart.GetInitialPixelForRow(j);
+
+                    //各像素处理:
+                    for (int i = 0; i < width; i++)
+                    {
+                        outPixel->R = (byte)(0.5 + 0.5 * Math.Cos(27.0 * i));
+                        outPixel->G = (byte)(0.5 - 0.5 * Math.Cos(59.0 * j));
+                        outPixel->B = (byte)(0.5 + 0.5 * Math.Sin(31.0 * j));
+                    }
+                });
+
+
+            return output;
+        }
+
+        //8.jpg 拆分为小图文件
+        private void button44_Click(object sender, EventArgs e)
+        {
+            Image<Bgr, byte> img = new Image<Bgr, byte>("8.bmp");
+            Image<Gray, byte> img2 = new Image<Gray, byte>("8.bmp");
+            this.pbOutput.Image = img.Bitmap;
+
+            double[] L2S = new double[100];
+            double[] L2Sa = new double[100];
+
+            #region Blobs
+            Emgu.CV.Cvb.CvBlobs bbs = new Emgu.CV.Cvb.CvBlobs();
+            Emgu.CV.Cvb.CvBlobDetector bd = new Emgu.CV.Cvb.CvBlobDetector();
+            uint n = bd.Detect(img2, bbs);
+
+            ////连通域配色:
+            Emgu.CV.Image<Bgr, byte> src2 = bd.DrawBlobs(img2, bbs, Emgu.CV.Cvb.CvBlobDetector.BlobRenderType.Color,2);
+
+            //this.Text = "找到连通域" + bbs.Count + "个";
+
+            //遍历各域:
+            for (uint i = 1; i <= bbs.Count; i++)
+            {
+
+                /*######################    一,  编号,质心,面积    #############################*/
+                uint lb = bbs[i].Label;//获取编号
+                PointF org = bbs[i].Centroid;//获取质心
+                float xOrg = org.X; float yOrg = org.Y;
+                int area = bbs[i].Area;//获取面积
+                Rectangle rect = bbs[i].BoundingBox;//获取矩形(X-Y方向)
+                //绘制矩形(X-Y方向边框):
+                CvInvoke.Rectangle(src2, rect, new MCvScalar(125, 0, 0), 2);
+
+                if (area > 5000)
+                {
+                    ////    ///*######################    二, 域块的矩    #############################*/
+                    ////    //Emgu.CV.Cvb.CvBlob.Moments mBlob = bbs[i].BlobMoments;//获取矩
+                    ////    ////mBlob属性有Mxx,Nxx,Pxx三类,  详见"EmguCV 轮廓匹配.htm"介绍
+
+                    ///*######################    三, 轮廓,最小外接矩形,长边/短边,倾斜角    #############################*/
+                    Point[] ctr0 = bbs[1].GetContour();//获取轮廓
+                    Point[] ctr = bbs[i].GetContour();//获取轮廓
+
+                    ////获取最小外接矩形:
+                    //RotatedRect rr = CvInvoke.MinAreaRect(new VectorOfPoint(ctr));
+                    //PointF[] rp = rr.GetVertices();
+                    ////绘制矩形与标记：
+                    //Point p0 = new Point((int)rp[0].X, (int)rp[0].Y);
+                    //CvInvoke.PutText(src2, "@1", p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    //for (int k = 1; k < rp.Length; k++)
+                    //{
+                    //    Point p1 = new Point((int)rp[k - 1].X, (int)rp[k - 1].Y);
+                    //    Point p2 = new Point((int)rp[k].X, (int)rp[k].Y);
+                    //    CvInvoke.Line(src2, p1, p2, new MCvScalar(255, k * 55, 255 - k * 55), 2);//红为头，绿为尾
+                    //    CvInvoke.PutText(src2, string.Format("@{0}", k + 1), p2, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    //}
+                    //CvInvoke.PutText(src2, string.Format("{0}", i), p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 1.5, new MCvScalar(255, 255, 255), 3);
+                    //CvInvoke.Line(src2, new Point((int)rp[0].X, (int)rp[0].Y), new Point((int)rp[3].X, (int)rp[3].Y), new MCvScalar(255, 0, 255), 2);//红为头，绿为尾
+                    
+
+                }
+
+
+
+            }
+            #endregion Blobs
+            pbOutput.Image = src2.Bitmap;//输出到控件
+        }
+
+
+        //9.bmp 各Blob特征
+        private void button45_Click(object sender, EventArgs e)
+        {
+            Image<Gray, Byte> img = new Image<Gray, byte>("9.bmp");
+            this.pbOutput.Image = img.Bitmap;
+            
+            double[] L2S = new double[100];
+            double[] L2Sa = new double[100];
+
+            #region Blobs
+            Emgu.CV.Cvb.CvBlobs bbs = new Emgu.CV.Cvb.CvBlobs();
+            Emgu.CV.Cvb.CvBlobDetector bd = new Emgu.CV.Cvb.CvBlobDetector();
+            uint n = bd.Detect(img, bbs);
+
+            ////连通域配色:
+            //Emgu.CV.Image<Bgr, byte> src2 = bd.DrawBlobs(img, bbs, Emgu.CV.Cvb.CvBlobDetector.BlobRenderType.Color, 2);
+
+            this.Text = "找到连通域" + bbs.Count + "个";
+
+            //遍历各域:
+            for (uint i = 1; i <= bbs.Count; i++)
+            {
+
+                /*######################  一,  编号,质心,面积      #############################*/
+                uint lb = bbs[i].Label;//获取编号
+                PointF org = bbs[i].Centroid;//获取质心
+                float xOrg = org.X; float yOrg = org.Y;
+                int area = bbs[i].Area;//获取面积
+                Rectangle rect = bbs[i].BoundingBox;//获取矩形(X-Y方向)
+                //绘制矩形(X-Y方向边框):
+                CvInvoke.Rectangle(img, rect, new MCvScalar(125, 0, 0), 2);
+
+                if (area < 36000)
+                {
+                    //    ///*######################    二, 域块的矩    #############################*/
+                    //    //Emgu.CV.Cvb.CvBlob.Moments mBlob = bbs[i].BlobMoments;//获取矩
+                    //    ////mBlob属性有Mxx,Nxx,Pxx三类,  详见"EmguCV 轮廓匹配.htm"介绍
+
+                    /*######################    三, 轮廓,最小外接矩形,长边/短边,倾斜角    #############################*/
+                    Point[] ctr0 = bbs[1].GetContour();//获取轮廓
+                    Point[] ctr = bbs[i].GetContour();//获取轮廓
+
+                    //获取最小外接矩形:
+                    RotatedRect rr = CvInvoke.MinAreaRect(new VectorOfPoint(ctr));
+                    PointF[] rp = rr.GetVertices();
+                    //绘制矩形与标记：
+                    Point p0 = new Point((int)rp[0].X, (int)rp[0].Y);
+                    CvInvoke.PutText(img, "@1", p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    for (int k = 1; k < rp.Length; k++)
+                    {
+                        Point p1 = new Point((int)rp[k - 1].X, (int)rp[k - 1].Y);
+                        Point p2 = new Point((int)rp[k].X, (int)rp[k].Y);
+                        CvInvoke.Line(img, p1, p2, new MCvScalar(255, k * 55, 255 - k * 55), 2);//红为头，绿为尾
+                        CvInvoke.PutText(img, string.Format("@{0}", k + 1), p2, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    }
+                    CvInvoke.PutText(img, string.Format("{0}", i), p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 1.5, new MCvScalar(255, 255, 255), 1);
+                    CvInvoke.Line(img, new Point((int)rp[0].X, (int)rp[0].Y), new Point((int)rp[3].X, (int)rp[3].Y), new MCvScalar(255, 0, 255), 2);//红为头，绿为尾
+
+
+
+
+
+                    ////计算:长边/短边: L2S=?
+                    //double L1 = Math.Sqrt((rp[0].X - rp[1].X) * (rp[0].X - rp[1].X) + (rp[0].Y - rp[1].Y) * (rp[0].Y - rp[1].Y));
+                    //double L2 = Math.Sqrt((rp[2].X - rp[1].X) * (rp[2].X - rp[1].X) + (rp[2].Y - rp[1].Y) * (rp[2].Y - rp[1].Y));
+                    //double Angle = 0; //double L2S = 0;
+
+                    ////MessageBox.Show(L2S[bbs.Count].ToString());
+                    //if (L1 >= L2)
+                    //{
+                    //    L2S[i] = L1 / L2;
+                    //    Angle = 57.3 * Math.Atan2(rp[0].Y - rp[1].Y, rp[0].X - rp[1].X);
+                    //    L2Sa[i] = L1 * L2;
+                    //}
+                    //else
+                    //{
+                    //    L2S[i] = L2 / L1;
+                    //    Angle = 57.3 * Math.Atan2(rp[2].Y - rp[1].Y, rp[2].X - rp[1].X);
+                    //    L2Sa[i] = L1 * L2;
+                    //}
+
+                    //MessageBox.Show(bbs.Count.ToString());
+                    //MessageBox.Show(L2S[i].ToString());
+                    //MessageBox.Show(L2Sa[i].ToString());
+
+
+
+                    /////*######################  四, 轮廓,  外凸包 , 半径集, R/r, avgR, stdR #############################*/
+                    //////1,形成稀疏半径集,计算半径均值,长半径/短半径,半径标准差:
+                    ////List<double> lp = new List<double>();//稀疏半径集
+                    ////for (int k = 5; k < ctr.Length; k += 5)
+                    ////{
+                    ////    Point p1 = ctr[k - 5];
+                    ////    Point p2 = ctr[k];
+                    ////    MCvScalar mc = new MCvScalar(255, k % 255, 255 - k % 255, 0);
+                    ////    CvInvoke.Line(src2, p1, p2, mc, 2);//红为头，绿为尾
+                    ////    CvInvoke.Circle(src2, p1, 3, mc, 4);
+                    ////    CvInvoke.Line(src2, new Point((int)xOrg, (int)yOrg), p2, mc, 2);//半径
+                    ////    double r = Math.Sqrt((p2.X - xOrg) * (p2.X - xOrg) + (p2.Y - yOrg) * (p2.Y - yOrg));
+                    ////    lp.Add(r);
+                    ////}
+                    ////CvInvoke.Line(src2, ctr[0], ctr[ctr.Length - 1], new MCvScalar(255, 0, 255), 2);
+
+                    //////2,半径均值,[长半径/短半径]比值,半径标准差,中心5点的深度或灰度值
+                    ////var avgR = lp.Average();
+                    ////var maxR = lp.Max(); var minR = lp.Min();
+                    ////double R2r = maxR / minR;
+
+                    //////求出半径标准差:
+                    //////先求平方和:
+                    ////double sum = lp.Sum(di => Math.Pow(di - avgR, 2));
+                    //////除以数量，然后开方:
+                    ////double stdR = Math.Sqrt(sum / (double)lp.Count());
+
+                    //////读取中心5点深度或灰度值:
+                    ////int x = (int)xOrg; int y = (int)yOrg; double zh00 = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg + 5; y = (int)yOrg + 5; double zhpp = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg + 5; y = (int)yOrg - 5; double zhpn = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg - 5; y = (int)yOrg - 5; double zhnn = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg - 5; y = (int)yOrg + 5; double zhnp = (img1.Data[y, x, 0]);
+                    ////double zh = (zh00 + zhpp + zhpn + zhnn + zhnp) / 5.0;
+
+                    /////*######################   五, 图形轮廓的匹配度    #############################*/
+                    ////double ms1 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I1);
+                    ////double ms2 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I2);
+                    ////double ms3 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I3);
+
+                    //    ////计算当前轮廓的矩,并根据二阶矩计算倾斜的角度:
+                    //    //MCvMoments mContour0 = CvInvoke.Moments(new VectorOfPoint(ctr0), false);//模板矩
+                    //    //MCvMoments mContour = CvInvoke.Moments(new VectorOfPoint(ctr), false);
+                    //    //double A0 = Math.Sign(mContour0.Mu11) * Math.Atan2(mContour0.Mu20, mContour0.Mu02) * 57.3;//模板倾斜角
+                    //    //double dltA = Math.Sign(mContour.Mu11) * Math.Atan2(mContour.Mu20, mContour.Mu02) * 57.3 - A0;//倾斜角[相对于模板]
+
+                    //    ////获取HU不变矩:
+                    //    //double[] hu = mContour.GetHuMoment();
+
+                    //    ///*######################   六, 显示    #############################*/
+                    //    ////一些为机器人用的特征参数--序号,倾斜角,质心坐标:
+                    //    //CvInvoke.PutText(src2, string.Format("Label:  {0}, Angle:{1:0.####}", (int)lb, -Angle), new System.Drawing.Point((int)org.X + 300, (int)org.Y), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("Centroid:  {0}, {1}", (int)org.X + 155, (int)org.Y), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 20), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+
+                    //    ////不进行缩放时的七不变矩(面积,轮廓周长,最小外接矩形的L2S,R/r,avgR,stdR,avgGray):
+                    //    //CvInvoke.PutText(src2, string.Format("Area:{0:0.####},Length:  {1}", area, ctr.Length), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 40), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("L2S:{0:0.####},R2r:{1:0.####}", L2S, R2r), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 60), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("avgR:{0:0.####},stdR:{1:0.####}", avgR, stdR), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 80), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("avgGray or avgDepth:{0:0.####}", zh), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 100), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 100, 100), 1);
+
+                    //    ////其他备用:
+                    //    //CvInvoke.PutText(src2, string.Format("MatchShapes= {0:0.####},{1:0.####},{2:0.####}", ms1, ms2, ms3), new System.Drawing.Point((int)org.X + 150, (int)org.Y + 120), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(55, 120, 50), 1);
+                    //    ////HU的七个不变矩:
+                    //    //CvInvoke.PutText(src2, string.Format("Contour_Hu[1...7]: {0:0.####},{1:0.####},{2:0.####},{3:0.####},{4:0.####},{5:0.####},{6:0.####}", hu[0], hu[1], hu[2], hu[3], hu[4], hu[5], hu[6]), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 140), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    ////二阶矩:
+                    //    //CvInvoke.PutText(src2, string.Format("Blobs U11,U02,U20:{0:0.####},{1:0.####},{2:0.####}", mBlob.U11, mBlob.U02, mBlob.U20), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 160), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("Contour mu11,mu20,mu02:  {0:0.####},{1:0.####},{2:0.####}", mContour.Mu11, mContour.Mu20, mContour.Mu02), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 180), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(155, 150, 150), 1);
+                    //    ////根据二阶矩计算倾斜的角度:
+                    //    //CvInvoke.PutText(src2, string.Format("AngleByMu:{0:0.####}", dltA), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 200), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(25, 220, 220), 1);
+
+                    //    ////还可以:"凸率(丰满度),圆度,惯性矩"等方面进行计算并处理识别匹配
+
+                }
+                //src2._Not();//红为尾，绿为头
+                #endregion Blobs
+                pbOutput.Image = img.Bitmap;//输出到控件
+            }
+            }
+
+
+        //10.jpeg  各Blob特征
+        private void button46_Click(object sender, EventArgs e)
+        {
+            Image<Gray, Byte> img = new Image<Gray, byte>("10.jpeg");
+            this.pbOutput.Image = img.Bitmap;
+
+            double[] L2S = new double[100];
+            double[] L2Sa = new double[100];
+
+            #region Blobs
+            Emgu.CV.Cvb.CvBlobs bbs = new Emgu.CV.Cvb.CvBlobs();
+            Emgu.CV.Cvb.CvBlobDetector bd = new Emgu.CV.Cvb.CvBlobDetector();
+            uint n = bd.Detect(img, bbs);
+
+            ////连通域配色:
+            //Emgu.CV.Image<Bgr, byte> src2 = bd.DrawBlobs(img, bbs, Emgu.CV.Cvb.CvBlobDetector.BlobRenderType.Color, 2);
+
+            this.Text = "找到连通域" + bbs.Count + "个";
+
+            //遍历各域:
+            for (uint i = 1; i <= bbs.Count; i++)
+            {
+
+                /*######################  一,  编号,质心,面积      #############################*/
+                uint lb = bbs[i].Label;//获取编号
+                PointF org = bbs[i].Centroid;//获取质心
+                float xOrg = org.X; float yOrg = org.Y;
+                int area = bbs[i].Area;//获取面积
+                Rectangle rect = bbs[i].BoundingBox;//获取矩形(X-Y方向)
+                //绘制矩形(X-Y方向边框):
+                CvInvoke.Rectangle(img, rect, new MCvScalar(125, 0, 0), 2);
+
+                if (area < 36000)
+                {
+                    //    ///*######################    二, 域块的矩    #############################*/
+                    //    //Emgu.CV.Cvb.CvBlob.Moments mBlob = bbs[i].BlobMoments;//获取矩
+                    //    ////mBlob属性有Mxx,Nxx,Pxx三类,  详见"EmguCV 轮廓匹配.htm"介绍
+
+                    /*######################    三, 轮廓,最小外接矩形,长边/短边,倾斜角    #############################*/
+                    Point[] ctr0 = bbs[1].GetContour();//获取轮廓
+                    Point[] ctr = bbs[i].GetContour();//获取轮廓
+
+                    //获取最小外接矩形:
+                    RotatedRect rr = CvInvoke.MinAreaRect(new VectorOfPoint(ctr));
+                    PointF[] rp = rr.GetVertices();
+                    //绘制矩形与标记：
+                    Point p0 = new Point((int)rp[0].X, (int)rp[0].Y);
+                    CvInvoke.PutText(img, "@1", p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    for (int k = 1; k < rp.Length; k++)
+                    {
+                        Point p1 = new Point((int)rp[k - 1].X, (int)rp[k - 1].Y);
+                        Point p2 = new Point((int)rp[k].X, (int)rp[k].Y);
+                        CvInvoke.Line(img, p1, p2, new MCvScalar(255, k * 55, 255 - k * 55), 2);//红为头，绿为尾
+                        CvInvoke.PutText(img, string.Format("@{0}", k + 1), p2, Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.75, new MCvScalar(155, 200, 155), 1);
+                    }
+                    CvInvoke.PutText(img, string.Format("{0}", i), p0, Emgu.CV.CvEnum.FontFace.HersheySimplex, 1.5, new MCvScalar(255, 255, 255), 1);
+                    CvInvoke.Line(img, new Point((int)rp[0].X, (int)rp[0].Y), new Point((int)rp[3].X, (int)rp[3].Y), new MCvScalar(255, 0, 255), 2);//红为头，绿为尾
+
+
+
+
+
+                    ////计算:长边/短边: L2S=?
+                    //double L1 = Math.Sqrt((rp[0].X - rp[1].X) * (rp[0].X - rp[1].X) + (rp[0].Y - rp[1].Y) * (rp[0].Y - rp[1].Y));
+                    //double L2 = Math.Sqrt((rp[2].X - rp[1].X) * (rp[2].X - rp[1].X) + (rp[2].Y - rp[1].Y) * (rp[2].Y - rp[1].Y));
+                    //double Angle = 0; //double L2S = 0;
+
+                    ////MessageBox.Show(L2S[bbs.Count].ToString());
+                    //if (L1 >= L2)
+                    //{
+                    //    L2S[i] = L1 / L2;
+                    //    Angle = 57.3 * Math.Atan2(rp[0].Y - rp[1].Y, rp[0].X - rp[1].X);
+                    //    L2Sa[i] = L1 * L2;
+                    //}
+                    //else
+                    //{
+                    //    L2S[i] = L2 / L1;
+                    //    Angle = 57.3 * Math.Atan2(rp[2].Y - rp[1].Y, rp[2].X - rp[1].X);
+                    //    L2Sa[i] = L1 * L2;
+                    //}
+
+                    //MessageBox.Show(bbs.Count.ToString());
+                    //MessageBox.Show(L2S[i].ToString());
+                    //MessageBox.Show(L2Sa[i].ToString());
+
+
+
+                    /////*######################  四, 轮廓,  外凸包 , 半径集, R/r, avgR, stdR #############################*/
+                    //////1,形成稀疏半径集,计算半径均值,长半径/短半径,半径标准差:
+                    ////List<double> lp = new List<double>();//稀疏半径集
+                    ////for (int k = 5; k < ctr.Length; k += 5)
+                    ////{
+                    ////    Point p1 = ctr[k - 5];
+                    ////    Point p2 = ctr[k];
+                    ////    MCvScalar mc = new MCvScalar(255, k % 255, 255 - k % 255, 0);
+                    ////    CvInvoke.Line(src2, p1, p2, mc, 2);//红为头，绿为尾
+                    ////    CvInvoke.Circle(src2, p1, 3, mc, 4);
+                    ////    CvInvoke.Line(src2, new Point((int)xOrg, (int)yOrg), p2, mc, 2);//半径
+                    ////    double r = Math.Sqrt((p2.X - xOrg) * (p2.X - xOrg) + (p2.Y - yOrg) * (p2.Y - yOrg));
+                    ////    lp.Add(r);
+                    ////}
+                    ////CvInvoke.Line(src2, ctr[0], ctr[ctr.Length - 1], new MCvScalar(255, 0, 255), 2);
+
+                    //////2,半径均值,[长半径/短半径]比值,半径标准差,中心5点的深度或灰度值
+                    ////var avgR = lp.Average();
+                    ////var maxR = lp.Max(); var minR = lp.Min();
+                    ////double R2r = maxR / minR;
+
+                    //////求出半径标准差:
+                    //////先求平方和:
+                    ////double sum = lp.Sum(di => Math.Pow(di - avgR, 2));
+                    //////除以数量，然后开方:
+                    ////double stdR = Math.Sqrt(sum / (double)lp.Count());
+
+                    //////读取中心5点深度或灰度值:
+                    ////int x = (int)xOrg; int y = (int)yOrg; double zh00 = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg + 5; y = (int)yOrg + 5; double zhpp = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg + 5; y = (int)yOrg - 5; double zhpn = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg - 5; y = (int)yOrg - 5; double zhnn = (img1.Data[y, x, 0]);
+                    ////x = (int)xOrg - 5; y = (int)yOrg + 5; double zhnp = (img1.Data[y, x, 0]);
+                    ////double zh = (zh00 + zhpp + zhpn + zhnn + zhnp) / 5.0;
+
+                    /////*######################   五, 图形轮廓的匹配度    #############################*/
+                    ////double ms1 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I1);
+                    ////double ms2 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I2);
+                    ////double ms3 = CvInvoke.MatchShapes(new VectorOfPoint(ctr0), new VectorOfPoint(ctr), ContoursMatchType.I3);
+
+                    //    ////计算当前轮廓的矩,并根据二阶矩计算倾斜的角度:
+                    //    //MCvMoments mContour0 = CvInvoke.Moments(new VectorOfPoint(ctr0), false);//模板矩
+                    //    //MCvMoments mContour = CvInvoke.Moments(new VectorOfPoint(ctr), false);
+                    //    //double A0 = Math.Sign(mContour0.Mu11) * Math.Atan2(mContour0.Mu20, mContour0.Mu02) * 57.3;//模板倾斜角
+                    //    //double dltA = Math.Sign(mContour.Mu11) * Math.Atan2(mContour.Mu20, mContour.Mu02) * 57.3 - A0;//倾斜角[相对于模板]
+
+                    //    ////获取HU不变矩:
+                    //    //double[] hu = mContour.GetHuMoment();
+
+                    //    ///*######################   六, 显示    #############################*/
+                    //    ////一些为机器人用的特征参数--序号,倾斜角,质心坐标:
+                    //    //CvInvoke.PutText(src2, string.Format("Label:  {0}, Angle:{1:0.####}", (int)lb, -Angle), new System.Drawing.Point((int)org.X + 300, (int)org.Y), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("Centroid:  {0}, {1}", (int)org.X + 155, (int)org.Y), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 20), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+
+                    //    ////不进行缩放时的七不变矩(面积,轮廓周长,最小外接矩形的L2S,R/r,avgR,stdR,avgGray):
+                    //    //CvInvoke.PutText(src2, string.Format("Area:{0:0.####},Length:  {1}", area, ctr.Length), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 40), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("L2S:{0:0.####},R2r:{1:0.####}", L2S, R2r), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 60), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("avgR:{0:0.####},stdR:{1:0.####}", avgR, stdR), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 80), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("avgGray or avgDepth:{0:0.####}", zh), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 100), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 100, 100), 1);
+
+                    //    ////其他备用:
+                    //    //CvInvoke.PutText(src2, string.Format("MatchShapes= {0:0.####},{1:0.####},{2:0.####}", ms1, ms2, ms3), new System.Drawing.Point((int)org.X + 150, (int)org.Y + 120), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(55, 120, 50), 1);
+                    //    ////HU的七个不变矩:
+                    //    //CvInvoke.PutText(src2, string.Format("Contour_Hu[1...7]: {0:0.####},{1:0.####},{2:0.####},{3:0.####},{4:0.####},{5:0.####},{6:0.####}", hu[0], hu[1], hu[2], hu[3], hu[4], hu[5], hu[6]), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 140), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    ////二阶矩:
+                    //    //CvInvoke.PutText(src2, string.Format("Blobs U11,U02,U20:{0:0.####},{1:0.####},{2:0.####}", mBlob.U11, mBlob.U02, mBlob.U20), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 160), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(255, 150, 150), 1);
+                    //    //CvInvoke.PutText(src2, string.Format("Contour mu11,mu20,mu02:  {0:0.####},{1:0.####},{2:0.####}", mContour.Mu11, mContour.Mu20, mContour.Mu02), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 180), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(155, 150, 150), 1);
+                    //    ////根据二阶矩计算倾斜的角度:
+                    //    //CvInvoke.PutText(src2, string.Format("AngleByMu:{0:0.####}", dltA), new System.Drawing.Point((int)org.X + 155, (int)org.Y + 200), Emgu.CV.CvEnum.FontFace.HersheySimplex, 0.5, new MCvScalar(25, 220, 220), 1);
+
+                    //    ////还可以:"凸率(丰满度),圆度,惯性矩"等方面进行计算并处理识别匹配
+
+                }
+                //src2._Not();//红为尾，绿为头
+                #endregion Blobs
+                pbOutput.Image = img.Bitmap;//输出到控件
+            }
+        }
+
+    }
+}
