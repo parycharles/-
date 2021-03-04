@@ -1,0 +1,357 @@
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;//要用到DllImport
+using System.Threading;
+using System.Drawing.Imaging;
+
+using Emgu.CV;
+using Emgu.CV.CvEnum;
+using Emgu.CV.Structure;
+using Emgu.CV.Util;
+using Emgu.Util;
+using Emgu.CV.UI;
+using Emgu.CV.OCR;
+using Emgu.CV.Features2D;
+using System.Threading;
+
+
+namespace BataDetector
+{
+
+    public partial class Form1 : Form
+    {
+
+
+        //窗体关闭时  :=====================================
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            Application.ExitThread(); Application.Exit(); Environment.Exit(0);
+        }
+
+        float PI = 3.14159265f;        
+        int picW, picH;//bmpfile图片文件之宽度与高度
+        bool[,] xy; //贮存边缘黑点
+        Dictionary<PointF, int> DP;//直线识别用
+        string strFileName;//打开的文件
+        static int h = 6;//条宽调节，范围：2---12
+        
+        
+        //构造函数:
+        public Form1()
+        {
+            InitializeComponent();
+            strFileName = "捕获08.PNG";
+            pictureBox1.Image = Bitmap.FromFile(strFileName);
+            DP = new Dictionary<PointF, int>();
+
+        }
+
+
+        /**********************************************************/
+        
+        //返回原图:
+        private void button1_Click_1(object sender, EventArgs e)
+        {
+            pictureBox1.Image = Bitmap.FromFile(strFileName);
+        }      
+        
+        //打开图片：
+        private void button2_Click_1(object sender, EventArgs e)
+        {
+            OpenFileDialog ofd = new OpenFileDialog();
+            ofd.Filter = "图片文件(*.jpg;*.png;*.bmp)|*.jpg;*.png;*.bmp|所有文件|*.*";
+            ofd.ValidateNames = true;
+            ofd.CheckPathExists = true;
+            ofd.CheckFileExists = true;
+            if (ofd.ShowDialog() == DialogResult.OK)
+            {
+                strFileName = ofd.FileName;
+                //其他代码：
+                pictureBox1.Image = Bitmap.FromFile(strFileName);
+            }
+        }
+
+
+        //保存图片：
+        private void button3_Click_1(object sender, EventArgs e)
+        {
+            /*
+             * //用户自己找目录，系统自动用时间戳作文件名：======================================
+            FolderBrowserDialog folder = new FolderBrowserDialog();
+            folder.Description = "选择所有文件存放目录";
+            if (folder.ShowDialog() == DialogResult.OK)
+            {
+
+                string sPath = folder.SelectedPath;
+                //MessageBox.Show(sPath);
+                pbOutput.Image.Save(sPath + "/Img" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".png");
+                this.Text = "文件已经保存在："+sPath ;
+            }
+            */
+
+
+            //用户自己找目录，取文件名时：===============================
+            SaveFileDialog saveFileDialog1 = new SaveFileDialog();
+
+            saveFileDialog1.Filter = "图片文件(*.png)|*.png";
+
+            saveFileDialog1.FilterIndex = 2;
+            saveFileDialog1.RestoreDirectory = true;
+
+            if (saveFileDialog1.ShowDialog() == DialogResult.OK)
+            {
+                pictureBox1.Image.Save(saveFileDialog1.FileName);
+            }
+
+        }
+
+        /**********************************************************/
+
+        //灰度化
+        private void button4_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Gray, Byte> thisnew = new Image<Gray, Byte>(start);
+            this.pictureBox1.Image = thisnew.ToBitmap();
+        }
+
+        //二值化
+        private void button5_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Gray, Byte> thisnew = new Image<Gray, Byte>(start);
+            Image<Gray, Byte> thisnew2 = new Image<Gray, Byte>(thisnew.Width, thisnew.Height);
+            CvInvoke.Threshold(thisnew, thisnew2, 150, 255, Emgu.CV.CvEnum.ThresholdType.Binary);
+            this.pictureBox1.Image = thisnew2.ToBitmap();
+        }
+
+        //Canny边缘化（轮廓）
+        private void button6_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Gray, Byte> thisnew = new Image<Gray, Byte>(start);
+            Image<Gray, Byte> thisnew2 = thisnew.Canny(100, 200);
+            this.pictureBox1.Image = thisnew2.ToBitmap();
+        }             
+
+        //平滑处理(中值模糊)：Smooth
+        private void button7_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr,byte>(start);
+            Image<Bgr, byte> thisnew2 = thisnew.SmoothMedian(5);
+            this.pictureBox1.Image = thisnew2.ToBitmap();
+
+        }
+
+        //高斯模糊
+        private void button8_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            Image<Bgr, byte> thisnew2 = thisnew.SmoothGaussian(15);
+            this.pictureBox1.Image = thisnew2.ToBitmap();
+        }
+
+
+        //膨胀
+        private void button9_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            Image<Bgr, byte> thisnew2 = new Image<Bgr, byte>(start);
+            Mat Struct_element = CvInvoke.GetStructuringElement(Emgu.CV.CvEnum.ElementShape.Cross, new Size(3, 3), new Point(-1, -1));
+            CvInvoke.Dilate(thisnew, thisnew2, Struct_element, new Point(1, 1), 3, Emgu.CV.CvEnum.BorderType.Default, new MCvScalar(0, 0, 0));
+            this.pictureBox1.Image = thisnew2.ToBitmap();
+        }
+
+        //腐蚀
+        private void button10_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            Image<Bgr, byte> thisnew2 = new Image<Bgr, byte>(start);
+            Mat Struct_element = CvInvoke.GetStructuringElement(Emgu.CV.CvEnum.ElementShape.Cross, new Size(3, 3), new Point(-1, -1));
+            CvInvoke.Dilate(thisnew, thisnew2, Struct_element, new Point(-1, -1), 3, Emgu.CV.CvEnum.BorderType.Default, new MCvScalar(0, 0, 0));
+            this.pictureBox1.Image = thisnew2.ToBitmap();
+        }
+
+        //镜像翻转(水平)     
+        private void button11_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            Image<Bgr, Byte> f2 = thisnew.Convert<Bgr, Byte>();
+            this.pictureBox1.Image = f2.Flip(Emgu.CV.CvEnum.FlipType.Horizontal).ToBitmap();
+        }
+
+        //垂直
+        private void button12_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            Image<Bgr, Byte> thisnew2 = thisnew.Convert<Bgr, Byte>();
+            this.pictureBox1.Image = thisnew2.Flip(Emgu.CV.CvEnum.FlipType.Vertical).ToBitmap();
+        }
+
+        //旋转
+        private void button13_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            
+            Image<Gray, Byte> f2 = thisnew.Convert<Gray, Byte>();
+            int rows = f2.Height;
+            int cols = f2.Width;            
+            Byte[,,] dp0 = f2.Data;
+            Byte[,,] dp1 = new byte[rows, cols, 1];
+
+            byte[,] a0 = new byte[3, 3];
+            double PI = 3.1416;
+
+            //二维旋转矩阵:
+            double[,] a1 ={ {Math.Cos(-PI/6),Math.Sin(-PI/6)},
+                            {-Math.Sin(-PI/6),Math.Cos(-PI/6)}
+                           };
+            //二维旋转变换:
+            for (int i = 0; i < rows; i++)
+                for (int j = 0; j < cols; j++)
+                {
+                    int x = (int)(rows / 2 + (i - rows / 2) * a1[0, 0] + (j - cols / 2) * a1[0, 1]);
+                    int y = (int)(cols / 2 + (i - rows / 2) * a1[1, 0] + (j - cols / 2) * a1[1, 1]);
+                    if (x > 0 && y > 0 && x < rows && y < cols)
+                    {
+                        dp1[x, y, 0] = dp0[i, j, 0];
+                    }
+                }
+            f2.Data = dp1;
+            this.pictureBox1.Image = f2.ToBitmap();
+        }
+
+
+        //画点线面
+        private void button15_Click(object sender, EventArgs e)
+        {
+            
+            //pictureBox1.Image = Bitmap.FromFile("2.png");
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, Byte> img = new Image<Bgr, byte>(400, 300, new Bgr(225, 220, 220));
+            this.pictureBox1.Image = img.ToBitmap();
+            //点
+            Point[] pts = new Point[5];
+            pts[0].X = 10; pts[0].Y = 10;
+            pts[1].X = 50; pts[1].Y = 10;
+            pts[2].X = 70; pts[2].Y = 50;
+            pts[3].X = 10; pts[3].Y = 70;
+            pts[4].X = 10; pts[4].Y = 170;
+            //CircleF circle = new CircleF(new System.Drawing.PointF(200, 200), 100.0f);
+            for (int i = 0; i < 4; i++)
+            {
+                img.Draw(new CircleF(pts[i], 3), new Bgr(0, 0, 255));
+                //img.Draw(circle, new Bgr(255, 0, 0), 2);
+            }
+
+            //画直线:
+            img.Draw(new LineSegment2D(pts[0], pts[4]), new Bgr(0, 50, 50), 5);
+
+            //画十字线:
+            img.Draw(new Cross2DF(new PointF(200, 100), 100, 80), new Bgr(255, 0, 255), 5); //画圆:
+
+            //画矩形:
+            img.Draw(new Rectangle(250, 120, 60, 40), new Bgr(255, 0, 255), 5);
+
+            //画多边形:           
+            img.FillConvexPoly(pts, new Bgr(255, 0, 0));
+
+            //画圆:
+            img.Draw(new CircleF(new PointF(200, 150), 100), new Bgr(255, 0, 255), 2);
+
+            //画椭圆:
+            img.Draw(new Ellipse(new PointF(300, 200), new Size(120, 100), 90), new Bgr(0, 255, 0), 2);
+            this.pictureBox1.Image = img.ToBitmap();
+        }
+        
+        //线性变换
+        private void button16_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);            
+            this.pictureBox1.Image = LinearOP(start, 2, 5);
+        }
+        private static Bitmap LinearOP(Bitmap a, double k, double v)
+        {
+            Rectangle rect = new Rectangle(0, 0, a.Width, a.Height);
+            System.Drawing.Imaging.BitmapData srcData = a.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadWrite, a.PixelFormat);
+            IntPtr ptr = srcData.Scan0;
+            int bytes = 0;
+            bytes = srcData.Stride * a.Height;
+            byte[] grayValues = new byte[bytes];
+            System.Runtime.InteropServices.Marshal.Copy(ptr, grayValues, 0, bytes);
+            int temp = 0;
+            for (int i = 0; i < bytes; i++)
+            {
+                temp = (int)(k * grayValues[i] + v + 0.5);
+                temp = (temp > 255) ? 255 : temp < 0 ? 0 : temp;
+                grayValues[i] = (byte)temp;
+            }
+            System.Runtime.InteropServices.Marshal.Copy(grayValues, 0, ptr, bytes);
+            a.UnlockBits(srcData);
+            return a;
+        }
+
+        //识别直线、圆、角
+        private void button17_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        //
+        private void button18_Click(object sender, EventArgs e)
+        {
+            Bitmap start = (Bitmap)pictureBox1.Image;
+            //Image<Bgr, byte> thisnew = new Image<Bgr, byte>(start);
+            Image<Gray, byte> img6 = new Image<Gray, byte>(Directory.GetCurrentDirectory() + start);
+            img6._Not();
+
+            #region Blobs
+            Emgu.CV.Cvb.CvBlobs bbs = new Emgu.CV.Cvb.CvBlobs();
+            Emgu.CV.Cvb.CvBlobDetector bd = new Emgu.CV.Cvb.CvBlobDetector();
+            uint n = bd.Detect(img6, bbs);
+
+            //连通域配色:
+            Emgu.CV.Image<Bgr, byte> src2 = bd.DrawBlobs(img6, bbs, Emgu.CV.Cvb.CvBlobDetector.BlobRenderType.Color, 1);
+
+            this.Text = "找到连通域" + bbs.Count + "个";
+
+            //遍历各域:
+            for (uint i = 1; i <= bbs.Count; i++)
+            {
+
+                /*######################  一,  编号,质心,面积      #############################*/
+                uint lb = bbs[i].Label;//获取编号
+                PointF org = bbs[i].Centroid;//获取质心
+                float xOrg = org.X; float yOrg = org.Y;
+                int area = bbs[i].Area;//获取面积
+                this.Text = "面积" + area;
+                Rectangle rect = bbs[i].BoundingBox;//获取矩形(X-Y方向)
+                                                    //绘制矩形(X-Y方向边框):
+                CvInvoke.Rectangle(src2, rect, new MCvScalar(125, 0, 0), 2);
+            }
+            #endregion Blobs
+        }
+        private void button14_Click(object sender, EventArgs e)
+        {
+
+        }
+
+    }
+}
